@@ -39,10 +39,44 @@ jobs:
             VERSION_NAME="0.0.0"
           fi
 
+          UNSIGNED_APK="app/build/outputs/apk/release/app-release-unsigned.apk"
+          SIGNED_APK="app/build/outputs/apk/release/app-release-signed.apk"
+
+          if [ ! -f "$UNSIGNED_APK" ]; then
+            echo "Unsigned release APK not found at $UNSIGNED_APK"
+            exit 1
+          fi
+
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n 1)
+          if [ -z "$APKSIGNER" ]; then
+            echo "apksigner tool was not found in $ANDROID_HOME/build-tools"
+            exit 1
+          fi
+
+          keytool -genkeypair \
+            -keystore release-signing-key.jks \
+            -alias release \
+            -storepass android \
+            -keypass android \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=GitHub Actions, OU=CI, O=noyt-droid, L=NA, S=NA, C=US"
+
+          "$APKSIGNER" sign \
+            --ks release-signing-key.jks \
+            --ks-key-alias release \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --out "$SIGNED_APK" \
+            "$UNSIGNED_APK"
+
+          "$APKSIGNER" verify "$SIGNED_APK"
+
           TAG="v${VERSION_NAME}-${GITHUB_RUN_NUMBER}"
           APK_NAME="noyt-droid-${TAG}.apk"
 
-          cp app/build/outputs/apk/release/app-release-unsigned.apk "$APK_NAME"
+          cp "$SIGNED_APK" "$APK_NAME"
 
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
