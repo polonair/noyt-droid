@@ -478,12 +478,20 @@ private fun MainScreen() {
                             try {
                                 val bridgeModule = Python.getInstance().getModule("bridge")
                                 val resolved = bridgeModule.callAttr("resolve_channel", normalized)
-                                val channelId = resolved.get("channel_id").toJava(String::class.java)
+                                val channelId = resolved.get("channel_id")
+                                    ?.toJava(String::class.java)
+                                    ?.takeIf { it.isNotBlank() }
                                     ?: throw IllegalStateException("Missing channel_id")
-                                val title = resolved.get("title").toJava(String::class.java)
+                                val title = resolved.get("title")
+                                    ?.toJava(String::class.java)
+                                    ?.takeIf { it.isNotBlank() }
                                     ?: channelId
-                                val avatarUrl = resolved.get("avatar_url").toJava(String::class.java)
-                                val handle = resolved.get("handle").toJava(String::class.java)
+                                val avatarUrl = resolved.get("avatar_url")
+                                    ?.toJava(String::class.java)
+                                    ?.takeIf { it.isNotBlank() }
+                                val handle = resolved.get("handle")
+                                    ?.toJava(String::class.java)
+                                    ?.takeIf { it.isNotBlank() }
 
                                 val exists = channels.any { it.id == channelId }
                                 if (exists) {
