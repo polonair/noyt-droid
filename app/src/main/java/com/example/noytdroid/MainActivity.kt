@@ -1,7 +1,10 @@
 package com.example.noytdroid
 
 import android.content.Context
+import android.content.ContentValues
 import android.os.Bundle
+import android.os.Environment
+import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -43,6 +46,9 @@ import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
 import java.io.File
 import java.io.IOException
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -99,6 +105,39 @@ private fun findLastDownloadedFile(downloadsDir: File): File? {
         ?.maxByOrNull { it.lastModified() }
 }
 
+private fun buildFinalMp3Name(): String {
+    val today = LocalDate.now(ZoneId.systemDefault())
+        .format(DateTimeFormatter.ofPattern("yyyy.MM.dd"))
+    val epochSeconds = System.currentTimeMillis() / 1000
+    return "$today-$epochSeconds.mp3"
+}
+
+private fun saveMp3ToDownloads(context: Context, sourceMp3: File): Result<Pair<String, String>> {
+    val resolver = context.contentResolver
+    val fileName = buildFinalMp3Name()
+    val relativePath = Environment.DIRECTORY_DOWNLOADS + "/YT Audio"
+
+    val values = ContentValues().apply {
+        put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+        put(MediaStore.Downloads.MIME_TYPE, "audio/mpeg")
+        put(MediaStore.Downloads.RELATIVE_PATH, relativePath)
+    }
+
+    val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+        ?: return Result.failure(IOException("Failed to create MediaStore entry"))
+
+    return runCatching {
+        resolver.openOutputStream(uri)?.use { output ->
+            sourceMp3.inputStream().use { input ->
+                input.copyTo(output)
+            }
+        } ?: error("Failed to open output stream")
+        Pair("Downloads/YT Audio/$fileName", uri.toString())
+    }.onFailure {
+        resolver.delete(uri, null, null)
+    }
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -141,6 +180,7 @@ private fun MainScreen() {
     var isRunning by rememberSaveable { mutableStateOf(false) }
     var runResults by remember { mutableStateOf(emptyList<String>()) }
     var ffmpegResultText by rememberSaveable { mutableStateOf("ffmpeg: idle") }
+    var lastSavedLocation by rememberSaveable { mutableStateOf("") }
 
     val sortedChannels = remember(channels) { channels.toList().sorted() }
 
@@ -236,11 +276,24 @@ private fun MainScreen() {
                         val result = if (source == null) {
                             "ffmpeg: error no source file in Downloads"
                         } else {
-                            val output = File(downloadsDir, "${source.nameWithoutExtension}.mp3")
+                            val output = File.createTempFile("yt_audio_", ".mp3", context.cacheDir)
                             val conversion = convertToMp3(source.absolutePath, output.absolutePath)
                             if (conversion.success) {
-                                "ffmpeg: ok"
+                                val saveResult = saveMp3ToDownloads(context, output)
+                                output.delete()
+                                saveResult.fold(
+                                    onSuccess = { (path, uri) ->
+                                        withContext(Dispatchers.Main) {
+                                            lastSavedLocation = "Saved to $path ($uri)"
+                                        }
+                                        "ffmpeg: ok"
+                                    },
+                                    onFailure = { error ->
+                                        "ffmpeg: error save failed: ${error.message ?: "unknown"}"
+                                    }
+                                )
                             } else {
+                                output.delete()
                                 "ffmpeg: error ${conversion.message}"
                             }
                         }
@@ -259,6 +312,13 @@ private fun MainScreen() {
             text = ffmpegResultText,
             style = MaterialTheme.typography.bodySmall
         )
+
+        if (lastSavedLocation.isNotBlank()) {
+            Text(
+                text = lastSavedLocation,
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
 
         Text(
             text = "Run results",
