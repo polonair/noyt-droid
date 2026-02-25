@@ -151,6 +151,7 @@ def resolve_channel(url_or_handle: str) -> dict:
     source = (url_or_handle or "").strip()
     if not source:
         raise ValueError("Channel link is empty")
+    print(f"resolve_channel: start source={source}")
 
     def best_thumbnail(info: dict) -> str | None:
         thumbnails = info.get("thumbnails")
@@ -177,11 +178,17 @@ def resolve_channel(url_or_handle: str) -> dict:
     options = {
         "quiet": True,
         "skip_download": True,
-        "noplaylist": False,
+        "noplaylist": True,
+        "extract_flat": True,
+        "playlistend": 1,
+        "socket_timeout": 15,
+        "retries": 2,
     }
 
+    print("resolve_channel: before extract_info")
     with yt_dlp.YoutubeDL(options) as ydl:
         info = ydl.extract_info(source, download=False)
+    print("resolve_channel: after extract_info")
 
     if not isinstance(info, dict):
         raise ValueError("Failed to resolve channel")
@@ -192,14 +199,16 @@ def resolve_channel(url_or_handle: str) -> dict:
     if isinstance(channel_id, str) and channel_id.startswith("UC"):
         pass
     else:
-        raise ValueError("Could not resolve channel_id")
+        raise ValueError("Could not resolve channel metadata (channel_id)")
 
     if not isinstance(title, str) or not title:
-        raise ValueError("Could not resolve channel title")
+        raise ValueError("Could not resolve channel metadata (title)")
 
-    return {
+    result = {
         "channel_id": channel_id,
         "title": title,
         "avatar_url": best_thumbnail(info),
         "handle": info.get("uploader_id") if isinstance(info.get("uploader_id"), str) else None,
     }
+    print(f"resolve_channel: done channel_id={channel_id}")
+    return result

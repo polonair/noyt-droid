@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -61,12 +62,15 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import kotlin.text.Regex
 
 private val Context.dataStore by preferencesDataStore(name = "channels")
 private val channelsKey = stringSetPreferencesKey("channels")
+private const val ADD_CHANNEL_TIMEOUT_MS = 20_000L
+private const val TAG_ADD_CHANNEL = "AddChannel"
 
 private data class Channel(
     val id: String,
@@ -251,6 +255,7 @@ private fun MainScreen() {
     var showDialog by rememberSaveable { mutableStateOf(false) }
     var inputChannelLink by rememberSaveable { mutableStateOf("") }
     var isResolvingChannel by rememberSaveable { mutableStateOf(false) }
+    var addChannelError by rememberSaveable { mutableStateOf<String?>(null) }
     var isRunning by rememberSaveable { mutableStateOf(false) }
     var runResults by remember { mutableStateOf(emptyList<String>()) }
     var ffmpegResultText by rememberSaveable { mutableStateOf("ffmpeg: idle") }
@@ -314,7 +319,10 @@ private fun MainScreen() {
 
         Row(modifier = Modifier.fillMaxWidth()) {
             Button(
-                onClick = { showDialog = true },
+                onClick = {
+                    addChannelError = null
+                    showDialog = true
+                },
                 modifier = Modifier.weight(1f)
             ) {
                 Text(text = "Add channel")
@@ -449,6 +457,7 @@ private fun MainScreen() {
                 if (!isResolvingChannel) {
                     showDialog = false
                     inputChannelLink = ""
+                    addChannelError = null
                 }
             },
             title = { Text(text = "Add channel") },
@@ -456,28 +465,53 @@ private fun MainScreen() {
                 Column {
                     OutlinedTextField(
                         value = inputChannelLink,
-                        onValueChange = { inputChannelLink = it },
+                        onValueChange = {
+                            inputChannelLink = it
+                            addChannelError = null
+                        },
                         label = { Text(text = "Paste YouTube channel link") },
                         modifier = Modifier.fillMaxWidth(),
                         enabled = !isResolvingChannel
                     )
+                    if (isResolvingChannel) {
+                        Text(
+                            text = "Adding...",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    if (!addChannelError.isNullOrBlank()) {
+                        Text(
+                            text = addChannelError.orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
                     Spacer(modifier = Modifier.height(4.dp))
                 }
             },
             confirmButton = {
                 TextButton(
                     onClick = {
+                        Log.d(TAG_ADD_CHANNEL, "UI click")
                         val normalized = normalizeChannelInput(inputChannelLink)
                         if (normalized.isBlank()) {
+                            addChannelError = "Empty channel link"
                             Toast.makeText(context, "Empty channel link", Toast.LENGTH_SHORT).show()
                             return@TextButton
                         }
 
                         isResolvingChannel = true
-                        scope.launch(Dispatchers.IO) {
+                        addChannelError = null
+                        scope.launch {
                             try {
-                                val bridgeModule = Python.getInstance().getModule("bridge")
-                                val resolved = bridgeModule.callAttr("resolve_channel", normalized)
+                                Log.d(TAG_ADD_CHANNEL, "calling python...")
+                                val resolved = withTimeout(ADD_CHANNEL_TIMEOUT_MS) {
+                                    withContext(Dispatchers.IO) {
+                                        val bridgeModule = Python.getInstance().getModule("bridge")
+                                        bridgeModule.callAttr("resolve_channel", normalized)
+                                    }
+                                }
+                                Log.d(TAG_ADD_CHANNEL, "python done")
                                 val channelId = resolved.get("channel_id")
                                     ?.toJava(String::class.java)
                                     ?.takeIf { it.isNotBlank() }
@@ -495,13 +529,11 @@ private fun MainScreen() {
 
                                 val exists = channels.any { it.id == channelId }
                                 if (exists) {
-                                    withContext(Dispatchers.Main) {
-                                        Toast.makeText(
-                                            context,
-                                            "Channel already added: $channelId",
-                                            Toast.LENGTH_SHORT
-                                        ).show()
-                                    }
+                                    Toast.makeText(
+                                        context,
+                                        "Channel already added: $channelId",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
                                 } else {
                                     val channel = Channel(
                                         id = channelId,
@@ -513,28 +545,33 @@ private fun MainScreen() {
                                         val existing = preferences[channelsKey] ?: emptySet()
                                         preferences[channelsKey] = existing + encodeChannel(channel)
                                     }
-                                    withContext(Dispatchers.Main) {
-                                        Toast.makeText(
-                                            context,
-                                            "Added: ${channel.title}",
-                                            Toast.LENGTH_SHORT
-                                        ).show()
-                                        showDialog = false
-                                        inputChannelLink = ""
-                                    }
-                                }
-                            } catch (e: Exception) {
-                                withContext(Dispatchers.Main) {
                                     Toast.makeText(
                                         context,
-                                        e.message ?: "Failed to resolve channel",
-                                        Toast.LENGTH_LONG
+                                        "Added: ${channel.title}",
+                                        Toast.LENGTH_SHORT
                                     ).show()
+                                    showDialog = false
+                                    inputChannelLink = ""
+                                    addChannelError = null
                                 }
+                            } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                                Log.e(TAG_ADD_CHANNEL, "timeout", e)
+                                addChannelError = "Timed out while resolving channel. Please try again."
+                                Toast.makeText(
+                                    context,
+                                    addChannelError,
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            } catch (e: Exception) {
+                                Log.e(TAG_ADD_CHANNEL, "error ${e.message}", e)
+                                addChannelError = e.message ?: "Failed to resolve channel"
+                                Toast.makeText(
+                                    context,
+                                    addChannelError,
+                                    Toast.LENGTH_LONG
+                                ).show()
                             } finally {
-                                withContext(Dispatchers.Main) {
-                                    isResolvingChannel = false
-                                }
+                                isResolvingChannel = false
                             }
                         }
                     },
@@ -548,6 +585,7 @@ private fun MainScreen() {
                     onClick = {
                         showDialog = false
                         inputChannelLink = ""
+                        addChannelError = null
                     },
                     enabled = !isResolvingChannel
                 ) {
