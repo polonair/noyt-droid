@@ -9,8 +9,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -37,15 +39,28 @@ import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
+import java.io.File
 import java.io.IOException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.text.Regex
 
 private val Context.dataStore by preferencesDataStore(name = "channels")
 private val channelsKey = stringSetPreferencesKey("channels")
+
+
+private fun safeBaseName(channelId: String, timestamp: Long): String {
+    val sanitized = channelId
+        .replace(Regex("[^A-Za-z0-9._-]"), "_")
+        .trim('_', '.', ' ')
+        .ifEmpty { "channel" }
+    return "${sanitized}_$timestamp"
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -87,7 +102,7 @@ private fun MainScreen() {
     var showDialog by rememberSaveable { mutableStateOf(false) }
     var inputChannelId by rememberSaveable { mutableStateOf("") }
     var isRunning by rememberSaveable { mutableStateOf(false) }
-    var runResults by remember { mutableStateOf(emptyList<Pair<String, String?>>()) }
+    var runResults by remember { mutableStateOf(emptyList<String>()) }
 
     val sortedChannels = remember(channels) { channels.toList().sorted() }
 
@@ -116,33 +131,61 @@ private fun MainScreen() {
             }
         }
 
-        Button(
-            onClick = { showDialog = true },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(text = "Add channel")
-        }
+        Row(modifier = Modifier.fillMaxWidth()) {
+            Button(
+                onClick = { showDialog = true },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(text = "Add channel")
+            }
 
-        Button(
-            onClick = {
-                isRunning = true
-                runResults = emptyList()
-                scope.launch(Dispatchers.IO) {
-                    val bridgeModule = Python.getInstance().getModule("bridge")
-                    val results = sortedChannels.map { channelId ->
-                        val url = bridgeModule.callAttr("latest_video_url", channelId).toJava(String::class.java)
-                        channelId to url
+            Spacer(modifier = Modifier.width(8.dp))
+
+            Button(
+                onClick = {
+                    isRunning = true
+                    runResults = emptyList()
+                    scope.launch(Dispatchers.IO) {
+                        val bridgeModule = Python.getInstance().getModule("bridge")
+                        val outDir = File(context.filesDir, "Downloads").apply { mkdirs() }
+                        val results = sortedChannels.map { channelId ->
+                            async {
+                                try {
+                                    val url = bridgeModule.callAttr("latest_video_url", channelId)
+                                        .toJava(String::class.java)
+                                    if (url.isNullOrBlank()) {
+                                        "$channelId -> none"
+                                    } else {
+                                        val baseName = safeBaseName(channelId, System.currentTimeMillis())
+                                        val downloaded = bridgeModule.callAttr(
+                                            "download_best_audio",
+                                            url,
+                                            outDir.absolutePath,
+                                            baseName
+                                        ).toJava(String::class.java) ?: "ERROR: empty response"
+
+                                        if (downloaded.startsWith("ERROR:")) {
+                                            "$channelId -> error: $downloaded"
+                                        } else {
+                                            "$channelId -> downloaded: ${File(downloaded).name}"
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    "$channelId -> error: ${e.message ?: "unknown"}"
+                                }
+                            }
+                        }.awaitAll()
+                        withContext(Dispatchers.Main) {
+                            runResults = results
+                            isRunning = false
+                        }
                     }
-                    withContext(Dispatchers.Main) {
-                        runResults = results
-                        isRunning = false
-                    }
-                }
-            },
-            enabled = !isRunning,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(text = if (isRunning) "Running..." else "Run")
+                },
+                enabled = !isRunning,
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(text = if (isRunning) "Running..." else "Run")
+            }
         }
 
         Text(
@@ -156,9 +199,9 @@ private fun MainScreen() {
                 style = MaterialTheme.typography.bodySmall
             )
         } else {
-            runResults.forEach { (channelId, url) ->
+            runResults.forEach { result ->
                 Text(
-                    text = "$channelId -> ${url ?: "none/error"}",
+                    text = result,
                     style = MaterialTheme.typography.bodySmall
                 )
             }
