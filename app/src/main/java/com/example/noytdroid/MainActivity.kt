@@ -2,6 +2,7 @@ package com.example.noytdroid
 
 import android.content.Context
 import android.content.ContentValues
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
@@ -113,10 +114,26 @@ private fun buildFinalMp3Name(): String {
 }
 
 private fun saveMp3ToDownloads(context: Context, sourceMp3: File): Result<Pair<String, String>> {
-    val resolver = context.contentResolver
     val fileName = buildFinalMp3Name()
-    val relativePath = Environment.DIRECTORY_DOWNLOADS + "/YT Audio"
 
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+        return runCatching {
+            val fallbackDir = File(context.filesDir, "Downloads/YT Audio").apply { mkdirs() }
+            val outputFile = File(fallbackDir, fileName)
+            sourceMp3.inputStream().use { input ->
+                outputFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            Pair(
+                "App storage/Downloads/YT Audio/${outputFile.name}",
+                outputFile.absolutePath
+            )
+        }
+    }
+
+    val resolver = context.contentResolver
+    val relativePath = Environment.DIRECTORY_DOWNLOADS + "/YT Audio"
     val values = ContentValues().apply {
         put(MediaStore.Downloads.DISPLAY_NAME, fileName)
         put(MediaStore.Downloads.MIME_TYPE, "audio/mpeg")
