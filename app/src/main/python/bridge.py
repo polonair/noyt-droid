@@ -63,7 +63,20 @@ def latest_video_url(channel_id: str) -> str | None:
         if first_url:
             return first_url
 
-        nested_url = first.get("url") if isinstance(first.get("url"), str) else None
+        nested_url = None
+        for field in ("url", "webpage_url"):
+            candidate = first.get(field)
+            if not isinstance(candidate, str):
+                continue
+
+            if "/channel/" in candidate and candidate.endswith("/videos"):
+                nested_url = candidate
+                break
+
+            if candidate.startswith("/") and candidate.endswith("/videos"):
+                nested_url = candidate
+                break
+
         if not nested_url:
             return None
 
