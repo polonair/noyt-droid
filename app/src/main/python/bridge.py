@@ -45,8 +45,7 @@ def latest_video_url(channel_id: str) -> str | None:
         with yt_dlp.YoutubeDL({
             "quiet": True,
             "skip_download": True,
-            "extract_flat": True,
-            "playlistend": 1,
+                "playlistend": 1,
             "noplaylist": False,
         }) as ydl:
             info = ydl.extract_info(channel_url, download=False)
@@ -86,8 +85,7 @@ def latest_video_url(channel_id: str) -> str | None:
         with yt_dlp.YoutubeDL({
             "quiet": True,
             "skip_download": True,
-            "extract_flat": True,
-            "playlistend": 1,
+                "playlistend": 1,
             "noplaylist": False,
         }) as ydl:
             nested_info = ydl.extract_info(nested_url, download=False)
@@ -143,3 +141,63 @@ def download_best_audio(url: str, out_dir: str, base_name: str) -> str:
         return "ERROR: Download finished, but file not found"
     except Exception as exc:
         return f"ERROR: {exc}"
+
+
+def resolve_channel(url_or_handle: str) -> dict:
+    import yt_dlp
+
+    source = (url_or_handle or "").strip()
+    if not source:
+        raise ValueError("Channel link is empty")
+
+    def best_thumbnail(info: dict) -> str | None:
+        thumbnails = info.get("thumbnails")
+        if isinstance(thumbnails, list):
+            valid = [item for item in thumbnails if isinstance(item, dict)]
+            valid.sort(
+                key=lambda t: (
+                    int(t.get("height") or 0) * int(t.get("width") or 0),
+                    int(t.get("preference") or 0),
+                ),
+                reverse=True,
+            )
+            for item in valid:
+                url = item.get("url")
+                if isinstance(url, str) and url:
+                    return url
+
+        direct = info.get("thumbnail")
+        if isinstance(direct, str) and direct:
+            return direct
+
+        return None
+
+    options = {
+        "quiet": True,
+        "skip_download": True,
+        "noplaylist": False,
+    }
+
+    with yt_dlp.YoutubeDL(options) as ydl:
+        info = ydl.extract_info(source, download=False)
+
+    if not isinstance(info, dict):
+        raise ValueError("Failed to resolve channel")
+
+    channel_id = info.get("channel_id") or info.get("id")
+    title = info.get("channel") or info.get("title")
+
+    if isinstance(channel_id, str) and channel_id.startswith("UC"):
+        pass
+    else:
+        raise ValueError("Could not resolve channel_id")
+
+    if not isinstance(title, str) or not title:
+        raise ValueError("Could not resolve channel title")
+
+    return {
+        "channel_id": channel_id,
+        "title": title,
+        "avatar_url": best_thumbnail(info),
+        "handle": info.get("uploader_id") if isinstance(info.get("uploader_id"), str) else None,
+    }
