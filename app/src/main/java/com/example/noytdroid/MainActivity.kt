@@ -48,9 +48,19 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.text.Regex
 
 private val Context.dataStore by preferencesDataStore(name = "channels")
 private val channelsKey = stringSetPreferencesKey("channels")
+
+
+private fun safeBaseName(channelId: String, timestamp: Long): String {
+    val sanitized = channelId
+        .replace(Regex("[^A-Za-z0-9._-]"), "_")
+        .trim('_', '.', ' ')
+        .ifEmpty { "channel" }
+    return "${sanitized}_$timestamp"
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -146,7 +156,7 @@ private fun MainScreen() {
                                     if (url.isNullOrBlank()) {
                                         "$channelId -> none"
                                     } else {
-                                        val baseName = "${channelId}_${System.currentTimeMillis()}"
+                                        val baseName = safeBaseName(channelId, System.currentTimeMillis())
                                         val downloaded = bridgeModule.callAttr(
                                             "download_best_audio",
                                             url,

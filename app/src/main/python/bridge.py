@@ -112,7 +112,11 @@ def download_best_audio(url: str, out_dir: str, base_name: str) -> str:
         import yt_dlp
 
         os.makedirs(out_dir, exist_ok=True)
-        outtmpl = os.path.join(out_dir, base_name + ".%(ext)s")
+        safe_name = os.path.basename(base_name).replace(os.sep, "_")
+        if os.altsep:
+            safe_name = safe_name.replace(os.altsep, "_")
+        safe_name = safe_name.strip(" .") or "audio"
+        outtmpl = os.path.join(out_dir, safe_name + ".%(ext)s")
 
         with yt_dlp.YoutubeDL({
             "format": "bestaudio/best",
@@ -122,12 +126,16 @@ def download_best_audio(url: str, out_dir: str, base_name: str) -> str:
         }) as ydl:
             info = ydl.extract_info(url, download=False)
             expected_path = ydl.prepare_filename(info)
+            expected_abs = os.path.abspath(expected_path)
+            allowed_root = os.path.abspath(out_dir)
+            if os.path.commonpath([expected_abs, allowed_root]) != allowed_root:
+                return "ERROR: Invalid output path"
             ydl.download([url])
 
-        if os.path.exists(expected_path):
-            return expected_path
+        if os.path.exists(expected_abs):
+            return expected_abs
 
-        matches = glob.glob(os.path.join(out_dir, base_name + ".*"))
+        matches = glob.glob(os.path.join(out_dir, safe_name + ".*"))
         if matches:
             matches.sort(key=lambda p: os.path.getmtime(p), reverse=True)
             return matches[0]
