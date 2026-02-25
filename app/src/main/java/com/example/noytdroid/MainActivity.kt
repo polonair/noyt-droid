@@ -1,7 +1,7 @@
 package com.example.noytdroid
 
-import android.content.Context
 import android.content.ContentValues
+import android.content.Context
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
@@ -9,15 +9,17 @@ import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
@@ -34,13 +36,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import coil.compose.AsyncImage
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.ReturnCode
 import com.chaquo.python.Python
@@ -57,11 +62,56 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import kotlin.text.Regex
 
 private val Context.dataStore by preferencesDataStore(name = "channels")
 private val channelsKey = stringSetPreferencesKey("channels")
 
+private data class Channel(
+    val id: String,
+    val title: String,
+    val avatarUrl: String?,
+    val handle: String?
+)
+
+private fun encodeChannel(channel: Channel): String {
+    return JSONObject()
+        .put("id", channel.id)
+        .put("title", channel.title)
+        .put("avatar_url", channel.avatarUrl)
+        .put("handle", channel.handle)
+        .toString()
+}
+
+private fun decodeChannel(serialized: String): Channel? {
+    return try {
+        val json = JSONObject(serialized)
+        val id = json.optString("id")
+        val title = json.optString("title", id)
+        if (id.isBlank()) {
+            null
+        } else {
+            Channel(
+                id = id,
+                title = title.ifBlank { id },
+                avatarUrl = json.optString("avatar_url").ifBlank { null },
+                handle = json.optString("handle").ifBlank { null }
+            )
+        }
+    } catch (_: Exception) {
+        val legacyId = serialized.trim()
+        if (legacyId.isBlank()) null else Channel(legacyId, legacyId, null, null)
+    }
+}
+
+private fun normalizeChannelInput(raw: String): String {
+    val trimmed = raw.trim()
+    if (trimmed.startsWith("@")) {
+        return "https://www.youtube.com/$trimmed"
+    }
+    return trimmed
+}
 
 private fun safeBaseName(channelId: String, timestamp: Long): String {
     val sanitized = channelId
@@ -189,17 +239,26 @@ private fun MainScreen() {
                 throw exception
             }
         }
-        .map { preferences -> preferences[channelsKey] ?: emptySet() }
-        .collectAsState(initial = emptySet())
+        .map { preferences ->
+            val decoded = (preferences[channelsKey] ?: emptySet())
+                .mapNotNull(::decodeChannel)
+                .associateBy { it.id }
+                .values
+            decoded.toList()
+        }
+        .collectAsState(initial = emptyList())
 
     var showDialog by rememberSaveable { mutableStateOf(false) }
-    var inputChannelId by rememberSaveable { mutableStateOf("") }
+    var inputChannelLink by rememberSaveable { mutableStateOf("") }
+    var isResolvingChannel by rememberSaveable { mutableStateOf(false) }
     var isRunning by rememberSaveable { mutableStateOf(false) }
     var runResults by remember { mutableStateOf(emptyList<String>()) }
     var ffmpegResultText by rememberSaveable { mutableStateOf("ffmpeg: idle") }
     var lastSavedLocation by rememberSaveable { mutableStateOf("") }
 
-    val sortedChannels = remember(channels) { channels.toList().sorted() }
+    val sortedChannels = remember(channels) {
+        channels.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.title })
+    }
 
     Column(
         modifier = Modifier
@@ -218,11 +277,38 @@ private fun MainScreen() {
                 .fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            items(sortedChannels) { channelId ->
-                Text(
-                    text = channelId,
-                    style = MaterialTheme.typography.bodyLarge
-                )
+            items(sortedChannels, key = { it.id }) { channel ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            Toast.makeText(
+                                context,
+                                "channel_id = ${channel.id}",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        },
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    AsyncImage(
+                        model = channel.avatarUrl,
+                        contentDescription = "Avatar ${channel.title}",
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(MaterialTheme.shapes.small)
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = channel.title,
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                        Text(
+                            text = channel.handle ?: channel.id,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
             }
         }
 
@@ -243,15 +329,15 @@ private fun MainScreen() {
                     scope.launch(Dispatchers.IO) {
                         val bridgeModule = Python.getInstance().getModule("bridge")
                         val outDir = File(context.filesDir, "Downloads").apply { mkdirs() }
-                        val results = sortedChannels.map { channelId ->
+                        val results = sortedChannels.map { channel ->
                             async {
                                 try {
-                                    val url = bridgeModule.callAttr("latest_video_url", channelId)
+                                    val url = bridgeModule.callAttr("latest_video_url", channel.id)
                                         .toJava(String::class.java)
                                     if (url.isNullOrBlank()) {
-                                        "$channelId -> none"
+                                        "${channel.id} -> none"
                                     } else {
-                                        val baseName = safeBaseName(channelId, System.currentTimeMillis())
+                                        val baseName = safeBaseName(channel.id, System.currentTimeMillis())
                                         val downloaded = bridgeModule.callAttr(
                                             "download_best_audio",
                                             url,
@@ -260,13 +346,13 @@ private fun MainScreen() {
                                         ).toJava(String::class.java) ?: "ERROR: empty response"
 
                                         if (downloaded.startsWith("ERROR:")) {
-                                            "$channelId -> error: $downloaded"
+                                            "${channel.id} -> error: $downloaded"
                                         } else {
-                                            "$channelId -> downloaded: ${File(downloaded).name}"
+                                            "${channel.id} -> downloaded: ${File(downloaded).name}"
                                         }
                                     }
                                 } catch (e: Exception) {
-                                    "$channelId -> error: ${e.message ?: "unknown"}"
+                                    "${channel.id} -> error: ${e.message ?: "unknown"}"
                                 }
                             }
                         }.awaitAll()
@@ -360,17 +446,20 @@ private fun MainScreen() {
     if (showDialog) {
         AlertDialog(
             onDismissRequest = {
-                showDialog = false
-                inputChannelId = ""
+                if (!isResolvingChannel) {
+                    showDialog = false
+                    inputChannelLink = ""
+                }
             },
             title = { Text(text = "Add channel") },
             text = {
                 Column {
                     OutlinedTextField(
-                        value = inputChannelId,
-                        onValueChange = { inputChannelId = it },
-                        label = { Text(text = "channel_id") },
-                        modifier = Modifier.fillMaxWidth()
+                        value = inputChannelLink,
+                        onValueChange = { inputChannelLink = it },
+                        label = { Text(text = "Paste YouTube channel link") },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isResolvingChannel
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                 }
@@ -378,28 +467,81 @@ private fun MainScreen() {
             confirmButton = {
                 TextButton(
                     onClick = {
-                        val trimmed = inputChannelId.trim()
-                        if (trimmed.isNotEmpty() && trimmed !in channels) {
-                            scope.launch {
-                                context.dataStore.edit { preferences ->
-                                    val updated = (preferences[channelsKey] ?: emptySet()) + trimmed
-                                    preferences[channelsKey] = updated
+                        val normalized = normalizeChannelInput(inputChannelLink)
+                        if (normalized.isBlank()) {
+                            Toast.makeText(context, "Empty channel link", Toast.LENGTH_SHORT).show()
+                            return@TextButton
+                        }
+
+                        isResolvingChannel = true
+                        scope.launch(Dispatchers.IO) {
+                            try {
+                                val bridgeModule = Python.getInstance().getModule("bridge")
+                                val resolved = bridgeModule.callAttr("resolve_channel", normalized)
+                                val channelId = resolved.get("channel_id").toJava(String::class.java)
+                                    ?: throw IllegalStateException("Missing channel_id")
+                                val title = resolved.get("title").toJava(String::class.java)
+                                    ?: channelId
+                                val avatarUrl = resolved.get("avatar_url").toJava(String::class.java)
+                                val handle = resolved.get("handle").toJava(String::class.java)
+
+                                val exists = channels.any { it.id == channelId }
+                                if (exists) {
+                                    withContext(Dispatchers.Main) {
+                                        Toast.makeText(
+                                            context,
+                                            "Channel already added: $channelId",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                } else {
+                                    val channel = Channel(
+                                        id = channelId,
+                                        title = title,
+                                        avatarUrl = avatarUrl,
+                                        handle = handle
+                                    )
+                                    context.dataStore.edit { preferences ->
+                                        val existing = preferences[channelsKey] ?: emptySet()
+                                        preferences[channelsKey] = existing + encodeChannel(channel)
+                                    }
+                                    withContext(Dispatchers.Main) {
+                                        Toast.makeText(
+                                            context,
+                                            "Added: ${channel.title}",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                        showDialog = false
+                                        inputChannelLink = ""
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                withContext(Dispatchers.Main) {
+                                    Toast.makeText(
+                                        context,
+                                        e.message ?: "Failed to resolve channel",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                            } finally {
+                                withContext(Dispatchers.Main) {
+                                    isResolvingChannel = false
                                 }
                             }
                         }
-                        showDialog = false
-                        inputChannelId = ""
-                    }
+                    },
+                    enabled = !isResolvingChannel
                 ) {
-                    Text(text = "Add")
+                    Text(text = if (isResolvingChannel) "Adding..." else "Add")
                 }
             },
             dismissButton = {
                 TextButton(
                     onClick = {
                         showDialog = false
-                        inputChannelId = ""
-                    }
+                        inputChannelLink = ""
+                    },
+                    enabled = !isResolvingChannel
                 ) {
                     Text(text = "Cancel")
                 }

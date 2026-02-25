@@ -67,6 +67,7 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
+    implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("io.github.jamaismagic.ffmpeg:ffmpeg-kit-main-16kb:6.1.7")
 
     testImplementation("junit:junit:4.13.2")
