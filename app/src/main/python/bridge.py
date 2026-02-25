@@ -45,7 +45,8 @@ def latest_video_url(channel_id: str) -> str | None:
         with yt_dlp.YoutubeDL({
             "quiet": True,
             "skip_download": True,
-                "playlistend": 1,
+            "extract_flat": True,
+            "playlistend": 1,
             "noplaylist": False,
         }) as ydl:
             info = ydl.extract_info(channel_url, download=False)
@@ -85,7 +86,8 @@ def latest_video_url(channel_id: str) -> str | None:
         with yt_dlp.YoutubeDL({
             "quiet": True,
             "skip_download": True,
-                "playlistend": 1,
+            "extract_flat": True,
+            "playlistend": 1,
             "noplaylist": False,
         }) as ydl:
             nested_info = ydl.extract_info(nested_url, download=False)
