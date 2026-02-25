@@ -2,6 +2,7 @@ package com.example.noytdroid
 
 import android.content.Context
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
@@ -34,10 +35,14 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.chaquo.python.Python
+import com.chaquo.python.android.AndroidPlatform
 import java.io.IOException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private val Context.dataStore by preferencesDataStore(name = "channels")
 private val channelsKey = stringSetPreferencesKey("channels")
@@ -45,6 +50,17 @@ private val channelsKey = stringSetPreferencesKey("channels")
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        if (!Python.isStarted()) {
+            Python.start(AndroidPlatform(this))
+        }
+        val bridgeModule = Python.getInstance().getModule("bridge")
+        val pyResult = bridgeModule.callAttr("hello").toString()
+        val ytDlpVersion = bridgeModule.callAttr("ytdlp_version").toString()
+
+        Toast.makeText(this, pyResult, Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, ytDlpVersion, Toast.LENGTH_SHORT).show()
+
         setContent {
             MaterialTheme {
                 MainScreen()
@@ -70,6 +86,8 @@ private fun MainScreen() {
 
     var showDialog by rememberSaveable { mutableStateOf(false) }
     var inputChannelId by rememberSaveable { mutableStateOf("") }
+    var isRunning by rememberSaveable { mutableStateOf(false) }
+    var runResults by remember { mutableStateOf(emptyList<Pair<String, String?>>()) }
 
     val sortedChannels = remember(channels) { channels.toList().sorted() }
 
@@ -103,6 +121,47 @@ private fun MainScreen() {
             modifier = Modifier.fillMaxWidth()
         ) {
             Text(text = "Add channel")
+        }
+
+        Button(
+            onClick = {
+                isRunning = true
+                runResults = emptyList()
+                scope.launch(Dispatchers.IO) {
+                    val bridgeModule = Python.getInstance().getModule("bridge")
+                    val results = sortedChannels.map { channelId ->
+                        val url = bridgeModule.callAttr("latest_video_url", channelId).toJava(String::class.java)
+                        channelId to url
+                    }
+                    withContext(Dispatchers.Main) {
+                        runResults = results
+                        isRunning = false
+                    }
+                }
+            },
+            enabled = !isRunning,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(text = if (isRunning) "Running..." else "Run")
+        }
+
+        Text(
+            text = "Run results",
+            style = MaterialTheme.typography.titleMedium
+        )
+
+        if (runResults.isEmpty()) {
+            Text(
+                text = "No results yet",
+                style = MaterialTheme.typography.bodySmall
+            )
+        } else {
+            runResults.forEach { (channelId, url) ->
+                Text(
+                    text = "$channelId -> ${url ?: "none/error"}",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
         }
     }
 
