@@ -37,6 +37,8 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.arthenica.ffmpegkit.FFmpegKit
+import com.arthenica.ffmpegkit.ReturnCode
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
 import java.io.File
@@ -60,6 +62,41 @@ private fun safeBaseName(channelId: String, timestamp: Long): String {
         .trim('_', '.', ' ')
         .ifEmpty { "channel" }
     return "${sanitized}_$timestamp"
+}
+
+private data class ConversionResult(
+    val success: Boolean,
+    val message: String
+)
+
+private fun convertToMp3(inputPath: String, outputPath: String): ConversionResult {
+    val command = "-y -i \"$inputPath\" -vn -c:a libmp3lame -b:a 192k \"$outputPath\""
+    val session = FFmpegKit.execute(command)
+    val returnCode = session.returnCode
+    val output = buildString {
+        append(session.failStackTrace.orEmpty())
+        if (session.allLogsAsString.isNotBlank()) {
+            if (isNotBlank()) append('\n')
+            append(session.allLogsAsString)
+        }
+        if (isBlank()) {
+            append(session.output.orEmpty())
+        }
+    }.trim().ifBlank { "Unknown ffmpeg result" }
+
+    return if (ReturnCode.isSuccess(returnCode)) {
+        ConversionResult(true, "ok")
+    } else {
+        ConversionResult(false, output)
+    }
+}
+
+private fun findLastDownloadedFile(downloadsDir: File): File? {
+    return downloadsDir
+        .listFiles { file ->
+            file.isFile && file.extension.lowercase() != "mp3"
+        }
+        ?.maxByOrNull { it.lastModified() }
 }
 
 class MainActivity : ComponentActivity() {
@@ -103,6 +140,7 @@ private fun MainScreen() {
     var inputChannelId by rememberSaveable { mutableStateOf("") }
     var isRunning by rememberSaveable { mutableStateOf(false) }
     var runResults by remember { mutableStateOf(emptyList<String>()) }
+    var ffmpegResultText by rememberSaveable { mutableStateOf("ffmpeg: idle") }
 
     val sortedChannels = remember(channels) { channels.toList().sorted() }
 
@@ -186,7 +224,41 @@ private fun MainScreen() {
             ) {
                 Text(text = if (isRunning) "Running..." else "Run")
             }
+
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            Button(
+                onClick = {
+                    scope.launch(Dispatchers.IO) {
+                        val downloadsDir = File(context.filesDir, "Downloads").apply { mkdirs() }
+                        val source = findLastDownloadedFile(downloadsDir)
+                        val result = if (source == null) {
+                            "ffmpeg: error no source file in Downloads"
+                        } else {
+                            val output = File(downloadsDir, "${source.nameWithoutExtension}.mp3")
+                            val conversion = convertToMp3(source.absolutePath, output.absolutePath)
+                            if (conversion.success) {
+                                "ffmpeg: ok"
+                            } else {
+                                "ffmpeg: error ${conversion.message}"
+                            }
+                        }
+                        withContext(Dispatchers.Main) {
+                            ffmpegResultText = result
+                        }
+                    }
+                },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(text = "Convert last to mp3")
+            }
         }
+
+        Text(
+            text = ffmpegResultText,
+            style = MaterialTheme.typography.bodySmall
+        )
 
         Text(
             text = "Run results",
