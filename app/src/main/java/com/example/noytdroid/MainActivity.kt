@@ -508,7 +508,7 @@ private fun MainScreen() {
                                 val resolved = withTimeout(ADD_CHANNEL_TIMEOUT_MS) {
                                     withContext(Dispatchers.IO) {
                                         val bridgeModule = Python.getInstance().getModule("bridge")
-                                        bridgeModule.callAttr("resolve_channel", normalized)
+                                        bridgeModule.callAttr("resolve_channel_fast", normalized)
                                     }
                                 }
                                 Log.d(TAG_ADD_CHANNEL, "python done")
