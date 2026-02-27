@@ -145,7 +145,7 @@ def download_best_audio(url: str, out_dir: str, base_name: str) -> str:
         return f"ERROR: {exc}"
 
 
-def resolve_channel(url_or_handle: str) -> dict:
+def resolve_channel_fast(url_or_handle: str) -> dict:
     import html
     import re
     import urllib.request
@@ -168,19 +168,28 @@ def resolve_channel(url_or_handle: str) -> dict:
             "Chrome/131.0.0.0 Safari/537.36"
         ),
         "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,*/*",
     }
 
     html_text = ""
+    status_code = None
+    final_url = source
     try:
         import requests
 
-        response = requests.get(source, headers=headers, timeout=(8, 12), allow_redirects=True)
+        response = requests.get(source, headers=headers, timeout=(10, 15), allow_redirects=True)
         response.raise_for_status()
+        status_code = response.status_code
+        final_url = response.url
         html_text = response.text
     except ImportError:
         request = urllib.request.Request(source, headers=headers)
-        with urllib.request.urlopen(request, timeout=12) as response:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            status_code = getattr(response, "status", None)
+            final_url = response.geturl()
             html_text = response.read().decode("utf-8", errors="ignore")
+
+    print(f"resolve_channel_fast: status={status_code} final_url={final_url}")
 
     def meta_property(name: str) -> str | None:
         pattern = re.compile(
@@ -215,18 +224,31 @@ def resolve_channel(url_or_handle: str) -> dict:
     og_image = meta_property("og:image")
     og_url = meta_property("og:url")
     canonical = canonical_href()
-    print(f"resolve_channel_fast: got meta og_url={og_url} canonical={canonical}")
+    print(
+        "resolve_channel_fast: found "
+        f"og_url={'yes' if og_url else 'no'}, canonical={'yes' if canonical else 'no'}"
+    )
 
     title = og_title or title_tag()
+    if title:
+        title = re.sub(r"\s*-\s*YouTube\s*$", "", title, flags=re.IGNORECASE).strip()
 
-    channel_id = extract_channel_id(og_url)
+    channel_id = extract_channel_id(final_url)
+    if not channel_id:
+        channel_id = extract_channel_id(og_url)
     if not channel_id:
         channel_id = extract_channel_id(canonical)
     if not channel_id:
         channel_id = extract_channel_id(html_text)
 
     if not channel_id:
-        raise ValueError("Missing channel_id")
+        raise ValueError(
+            "Missing channel_id: "
+            f"status_code={status_code}, "
+            f"final_url={final_url}, "
+            f"meta/canonical not found="
+            f"{not og_url and not canonical}"
+        )
     if not title:
         raise ValueError("Missing title")
 
@@ -235,6 +257,11 @@ def resolve_channel(url_or_handle: str) -> dict:
         "title": title,
         "avatar_url": og_image,
         "source_url": source,
+        "final_url": final_url,
     }
     print(f"resolve_channel_fast: done channel_id={channel_id}")
     return result
+
+
+def resolve_channel(url_or_handle: str) -> dict:
+    return resolve_channel_fast(url_or_handle)
