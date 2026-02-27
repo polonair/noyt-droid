@@ -146,69 +146,95 @@ def download_best_audio(url: str, out_dir: str, base_name: str) -> str:
 
 
 def resolve_channel(url_or_handle: str) -> dict:
-    import yt_dlp
+    import html
+    import re
+    import urllib.request
 
     source = (url_or_handle or "").strip()
     if not source:
         raise ValueError("Channel link is empty")
-    print(f"resolve_channel: start source={source}")
 
-    def best_thumbnail(info: dict) -> str | None:
-        thumbnails = info.get("thumbnails")
-        if isinstance(thumbnails, list):
-            valid = [item for item in thumbnails if isinstance(item, dict)]
-            valid.sort(
-                key=lambda t: (
-                    int(t.get("height") or 0) * int(t.get("width") or 0),
-                    int(t.get("preference") or 0),
-                ),
-                reverse=True,
-            )
-            for item in valid:
-                url = item.get("url")
-                if isinstance(url, str) and url:
-                    return url
+    if source.startswith("@"):
+        source = f"https://www.youtube.com/{source}"
+    elif not re.match(r"^https?://", source, flags=re.IGNORECASE):
+        source = f"https://{source}"
 
-        direct = info.get("thumbnail")
-        if isinstance(direct, str) and direct:
-            return direct
+    print(f"resolve_channel_fast: start source={source}")
 
-        return None
-
-    options = {
-        "quiet": True,
-        "skip_download": True,
-        "noplaylist": True,
-        "extract_flat": True,
-        "playlistend": 1,
-        "socket_timeout": 15,
-        "retries": 2,
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
     }
 
-    print("resolve_channel: before extract_info")
-    with yt_dlp.YoutubeDL(options) as ydl:
-        info = ydl.extract_info(source, download=False)
-    print("resolve_channel: after extract_info")
+    html_text = ""
+    try:
+        import requests
 
-    if not isinstance(info, dict):
-        raise ValueError("Failed to resolve channel")
+        response = requests.get(source, headers=headers, timeout=(8, 12), allow_redirects=True)
+        response.raise_for_status()
+        html_text = response.text
+    except ImportError:
+        request = urllib.request.Request(source, headers=headers)
+        with urllib.request.urlopen(request, timeout=12) as response:
+            html_text = response.read().decode("utf-8", errors="ignore")
 
-    channel_id = info.get("channel_id") or info.get("id")
-    title = info.get("channel") or info.get("title")
+    def meta_property(name: str) -> str | None:
+        pattern = re.compile(
+            r'<meta[^>]+property=["\']{}["\'][^>]+content=["\']([^"\']+)["\']'.format(re.escape(name)),
+            flags=re.IGNORECASE,
+        )
+        match = pattern.search(html_text)
+        return html.unescape(match.group(1).strip()) if match else None
 
-    if isinstance(channel_id, str) and channel_id.startswith("UC"):
-        pass
-    else:
-        raise ValueError("Could not resolve channel metadata (channel_id)")
+    def title_tag() -> str | None:
+        match = re.search(r"<title[^>]*>(.*?)</title>", html_text, flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            return None
+        value = re.sub(r"\s+", " ", match.group(1)).strip()
+        return html.unescape(value) if value else None
 
-    if not isinstance(title, str) or not title:
-        raise ValueError("Could not resolve channel metadata (title)")
+    def canonical_href() -> str | None:
+        match = re.search(
+            r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']+)["\']',
+            html_text,
+            flags=re.IGNORECASE,
+        )
+        return html.unescape(match.group(1).strip()) if match else None
+
+    def extract_channel_id(text: str | None) -> str | None:
+        if not text:
+            return None
+        match = re.search(r"/channel/(UC[a-zA-Z0-9_-]{10,})", text)
+        return match.group(1) if match else None
+
+    og_title = meta_property("og:title")
+    og_image = meta_property("og:image")
+    og_url = meta_property("og:url")
+    canonical = canonical_href()
+    print(f"resolve_channel_fast: got meta og_url={og_url} canonical={canonical}")
+
+    title = og_title or title_tag()
+
+    channel_id = extract_channel_id(og_url)
+    if not channel_id:
+        channel_id = extract_channel_id(canonical)
+    if not channel_id:
+        channel_id = extract_channel_id(html_text)
+
+    if not channel_id:
+        raise ValueError("Missing channel_id")
+    if not title:
+        raise ValueError("Missing title")
 
     result = {
         "channel_id": channel_id,
         "title": title,
-        "avatar_url": best_thumbnail(info),
-        "handle": info.get("uploader_id") if isinstance(info.get("uploader_id"), str) else None,
+        "avatar_url": og_image,
+        "source_url": source,
     }
-    print(f"resolve_channel: done channel_id={channel_id}")
+    print(f"resolve_channel_fast: done channel_id={channel_id}")
     return result
