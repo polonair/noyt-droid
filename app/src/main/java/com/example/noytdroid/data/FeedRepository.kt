@@ -17,7 +17,7 @@ class FeedRepository(private val db: AppDatabase) {
 
     suspend fun upsertVideos(videos: List<VideoEntity>) {
         if (videos.isNotEmpty()) {
-            db.videoDao().upsertVideos(videos)
+            db.videoDao().insertVideosIgnore(videos)
         }
     }
 

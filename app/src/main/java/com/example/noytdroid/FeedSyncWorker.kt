@@ -2,14 +2,21 @@ package com.example.noytdroid
 
 import android.content.Context
 import androidx.work.CoroutineWorker
+import androidx.work.Constraints
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.NetworkType
+import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.example.noytdroid.data.AppDatabase
+import com.example.noytdroid.data.DownloadState
 import com.example.noytdroid.data.VideoEntity
 
 private const val DEFAULT_BATCH_SIZE = 15
 private const val KEY_BATCH_SIZE = "batchSize"
 private const val TAG_FEED_SYNC_WORKER = "FeedSync"
 private const val LOG_RETENTION_MS = 7L * 24 * 60 * 60 * 1000
+const val AUTO_DOWNLOAD_ONE_WORK_NAME = "auto_download_one"
 
 class FeedSyncWorker(
     context: Context,
@@ -36,26 +43,30 @@ class FeedSyncWorker(
             val syncTimestamp = System.currentTimeMillis()
             runCatching {
                 val videos = fetchChannelFeed(channel.channelId, logger)
-                val videoEntities = videos.map { video ->
-                    VideoEntity(
-                        videoId = video.videoId,
-                        channelId = channel.channelId,
-                        title = video.title,
-                        publishedAt = video.published.toEpochMilli(),
-                        videoUrl = video.videoUrl,
-                        fetchedAt = syncTimestamp,
-                        downloadedAt = null
-                    )
-                }
-
                 val existingVideoIds = videoDao.getVideoIdsForChannel(channel.channelId).toHashSet()
-                val newVideosCount = videoEntities.count { !existingVideoIds.contains(it.videoId) }
-                totalNewVideos += newVideosCount
+                val newVideoEntities = videos
+                    .filterNot { existingVideoIds.contains(it.videoId) }
+                    .map { video ->
+                        VideoEntity(
+                            videoId = video.videoId,
+                            channelId = channel.channelId,
+                            title = video.title,
+                            publishedAt = video.published.toEpochMilli(),
+                            videoUrl = video.videoUrl,
+                            fetchedAt = syncTimestamp,
+                            downloadState = DownloadState.NEW,
+                            downloadedUri = null,
+                            downloadedAt = null,
+                            downloadError = null
+                        )
+                    }
 
-                videoDao.upsertVideos(videoEntities)
+                totalNewVideos += newVideoEntities.size
+
+                videoDao.insertVideosIgnore(newVideoEntities)
                 logger.info(
                     TAG_FEED_SYNC_WORKER,
-                    "Channel ${channel.channelId} synced. fetched=${videoEntities.size} new=$newVideosCount"
+                    "Channel ${channel.channelId} synced. fetched=${videos.size} new=${newVideoEntities.size}"
                 )
             }.onFailure { error ->
                 logger.error(
@@ -80,6 +91,19 @@ class FeedSyncWorker(
             TAG_FEED_SYNC_WORKER,
             "Sync finished. channels=${channels.size} newVideos=$totalNewVideos"
         )
+
+        WorkManager.getInstance(applicationContext)
+            .enqueueUniqueWork(
+                AUTO_DOWNLOAD_ONE_WORK_NAME,
+                ExistingWorkPolicy.KEEP,
+                OneTimeWorkRequestBuilder<AutoDownloadOneWorker>()
+                    .setConstraints(
+                        Constraints.Builder()
+                            .setRequiredNetworkType(NetworkType.CONNECTED)
+                            .build()
+                    )
+                    .build()
+            )
 
         return Result.success()
     }

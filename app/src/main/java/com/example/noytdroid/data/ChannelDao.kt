@@ -22,6 +22,10 @@ interface ChannelDao {
     )
     suspend fun getOldestForSync(limit: Int): List<ChannelEntity>
 
+
+    @Query("SELECT * FROM channels WHERE channelId = :channelId LIMIT 1")
+    suspend fun getChannel(channelId: String): ChannelEntity?
+
     @Query("UPDATE channels SET lastFeedSyncAt = :timestamp WHERE channelId = :channelId")
     suspend fun updateLastSync(channelId: String, timestamp: Long)
 

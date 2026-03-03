@@ -15,7 +15,7 @@ import androidx.room.PrimaryKey
             onDelete = ForeignKey.CASCADE
         )
     ],
-    indices = [Index(value = ["channelId"])]
+    indices = [Index(value = ["channelId"]), Index(value = ["downloadState", "fetchedAt"])]
 )
 data class VideoEntity(
     @PrimaryKey val videoId: String,
@@ -24,5 +24,15 @@ data class VideoEntity(
     val publishedAt: Long,
     val videoUrl: String,
     val fetchedAt: Long,
-    val downloadedAt: Long?
+    val downloadState: String,
+    val downloadedUri: String?,
+    val downloadedAt: Long?,
+    val downloadError: String?
 )
+
+object DownloadState {
+    const val NEW = "NEW"
+    const val DOWNLOADING = "DOWNLOADING"
+    const val DONE = "DONE"
+    const val ERROR = "ERROR"
+}

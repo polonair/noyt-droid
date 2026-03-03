@@ -2,6 +2,8 @@ package com.example.noytdroid
 
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
@@ -9,6 +11,7 @@ import android.provider.MediaStore
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -53,9 +56,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.activity.result.contract.ActivityResultContracts
 import coil.compose.AsyncImage
 import com.example.noytdroid.data.AppDatabase
 import com.example.noytdroid.data.ChannelEntity
+import com.example.noytdroid.data.DownloadState
 import com.example.noytdroid.data.FeedRepository
 import com.example.noytdroid.data.VideoEntity
 import com.example.noytdroid.data.toVideoItem
@@ -441,6 +446,29 @@ private fun MainScreen() {
     var lastSavedLocation by rememberSaveable { mutableStateOf("") }
 
     val sortedChannels = channels
+    val syncFolderPreferences = remember { SyncFolderPreferences(context) }
+    var syncFolderUriText by rememberSaveable { mutableStateOf("") }
+
+    val folderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(uri, flags)
+            scope.launch(Dispatchers.IO) {
+                syncFolderPreferences.saveTreeUri(uri)
+            }
+            syncFolderUriText = uri.toString()
+            Toast.makeText(context, "Sync folder selected", Toast.LENGTH_SHORT).show()
+        }.onFailure { error ->
+            Toast.makeText(context, "Cannot persist folder permission: ${error.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        syncFolderUriText = syncFolderPreferences.getTreeUriString().orEmpty()
+    }
 
     if (showLogsScreen) {
         LogsScreen(
@@ -616,6 +644,22 @@ private fun MainScreen() {
             ) {
                 Text(text = "Convert last to mp3")
             }
+        }
+
+        Button(
+            onClick = { folderPickerLauncher.launch(null) },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(text = "Choose sync folder")
+        }
+
+        if (syncFolderUriText.isNotBlank()) {
+            Text(
+                text = "Sync folder: $syncFolderUriText",
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
         }
 
         Text(
@@ -813,7 +857,10 @@ private fun ChannelVideosScreen(
                     publishedAt = video.published.toEpochMilli(),
                     videoUrl = video.videoUrl,
                     fetchedAt = fetchedAt,
-                    downloadedAt = null
+                    downloadState = DownloadState.NEW,
+                    downloadedUri = null,
+                    downloadedAt = null,
+                    downloadError = null
                 )
             }
             withContext(Dispatchers.IO) {
