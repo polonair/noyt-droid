@@ -13,6 +13,18 @@ interface ChannelDao {
     @Upsert
     suspend fun upsertChannel(channel: ChannelEntity)
 
+    @Query(
+        """
+        SELECT * FROM channels
+        ORDER BY lastFeedSyncAt IS NOT NULL, lastFeedSyncAt ASC
+        LIMIT :limit
+        """
+    )
+    suspend fun getOldestForSync(limit: Int): List<ChannelEntity>
+
+    @Query("UPDATE channels SET lastFeedSyncAt = :timestamp WHERE channelId = :channelId")
+    suspend fun updateLastSync(channelId: String, timestamp: Long)
+
     @Query("DELETE FROM channels WHERE channelId = :channelId")
     suspend fun deleteChannel(channelId: String)
 }

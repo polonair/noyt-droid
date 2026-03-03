@@ -694,7 +694,8 @@ private fun MainScreen() {
                                             avatarUrl = resolved.avatarUrl,
                                             sourceUrl = normalized,
                                             createdAt = existing?.createdAt ?: now,
-                                            updatedAt = now
+                                            updatedAt = now,
+                                            lastFeedSyncAt = existing?.lastFeedSyncAt
                                         )
                                     )
                                 }

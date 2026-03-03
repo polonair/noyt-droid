@@ -10,5 +10,6 @@ data class ChannelEntity(
     val avatarUrl: String?,
     val sourceUrl: String,
     val createdAt: Long,
-    val updatedAt: Long
+    val updatedAt: Long,
+    val lastFeedSyncAt: Long? = null
 )
