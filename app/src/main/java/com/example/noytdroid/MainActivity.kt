@@ -231,7 +231,9 @@ suspend fun fetchChannelFeed(channelId: String, logger: AppLogger? = null, limit
 
         val parsed = rawItems.mapNotNull { raw ->
             val item: Map<String, PyObject> = try {
-                raw.asMap()
+                raw.asMap().mapNotNull { (key, value) ->
+                    (key.toJava(String::class.java) as? String)?.let { it to value }
+                }.toMap()
             } catch (_: RuntimeException) {
                 return@mapNotNull null
             }
