@@ -13,6 +13,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -475,6 +476,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun MainScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -971,6 +973,7 @@ private fun formatPublishedDate(value: Instant?): String {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun ChannelVideosScreen(
     channel: ChannelEntity,
     repository: FeedRepository,
