@@ -97,6 +97,8 @@ import kotlin.text.Regex
 
 private const val ADD_CHANNEL_TIMEOUT_MS = 20_000L
 private const val TAG_ADD_CHANNEL = "AddChannel"
+private const val TAG_MP3_SAVE = "Mp3Save"
+private const val POLIFM_ALBUM = "Polifm"
 private const val LOG_SCREEN_LIMIT = 200
 private const val MANUAL_FEED_SYNC_WORK_NAME = "feed_sync_manual"
 private val UC_CHANNEL_ID_REGEX = Regex("""/channel/(UC[a-zA-Z0-9_-]{10,})""")
@@ -268,7 +270,7 @@ private data class ConversionResult(
 )
 
 private fun convertToMp3(inputPath: String, outputPath: String): ConversionResult {
-    val command = "-y -i \"$inputPath\" -vn -c:a libmp3lame -b:a 192k \"$outputPath\""
+    val command = "-y -i \"$inputPath\" -vn -c:a libmp3lame -b:a 192k -id3v2_version 3 -metadata album=\"$POLIFM_ALBUM\" \"$outputPath\""
     val session = FFmpegKit.execute(command)
     val returnCode = session.returnCode
     val output = buildString {
@@ -297,25 +299,55 @@ private fun findLastDownloadedFile(downloadsDir: File): File? {
         ?.maxByOrNull { it.lastModified() }
 }
 
-private fun buildFinalMp3Name(): String {
+private fun buildFinalMp3Name(epochSeconds: Long = System.currentTimeMillis() / 1000): String {
     val today = LocalDate.now(ZoneId.systemDefault())
         .format(DateTimeFormatter.ofPattern("yyyy.MM.dd"))
-    val epochSeconds = System.currentTimeMillis() / 1000
     return "$today-$epochSeconds.mp3"
 }
 
-private fun saveMp3ToDownloads(context: Context, sourceMp3: File): Result<Pair<String, String>> {
-    val fileName = buildFinalMp3Name()
+private fun buildUniqueMp3Name(exists: (String) -> Boolean): String {
+    val epochSeconds = System.currentTimeMillis() / 1000
+    val baseName = buildFinalMp3Name(epochSeconds).removeSuffix(".mp3")
+    var candidate = "$baseName.mp3"
+    var suffix = 1
+    while (exists(candidate)) {
+        candidate = "$baseName-$suffix.mp3"
+        suffix += 1
+    }
+    return candidate
+}
+
+private fun mediaStoreFileExists(context: Context, relativePath: String, fileName: String): Boolean {
+    val resolver = context.contentResolver
+    val selection = "${MediaStore.Downloads.RELATIVE_PATH}=? AND ${MediaStore.Downloads.DISPLAY_NAME}=?"
+    val args = arrayOf("$relativePath/", fileName)
+    resolver.query(
+        MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+        arrayOf(MediaStore.Downloads._ID),
+        selection,
+        args,
+        null
+    )?.use { cursor ->
+        return cursor.moveToFirst()
+    }
+    return false
+}
+
+private fun saveMp3ToDownloads(context: Context, sourceMp3: File, logger: AppLogger? = null): Result<Pair<String, String>> {
+    val relativePath = Environment.DIRECTORY_DOWNLOADS + "/YT Audio"
 
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
         return runCatching {
             val fallbackDir = File(context.filesDir, "Downloads/YT Audio").apply { mkdirs() }
+            val fileName = buildUniqueMp3Name { candidate -> File(fallbackDir, candidate).exists() }
             val outputFile = File(fallbackDir, fileName)
             sourceMp3.inputStream().use { input ->
                 outputFile.outputStream().use { output ->
                     input.copyTo(output)
                 }
             }
+            logger?.info(TAG_MP3_SAVE, "Saved fileName=$fileName")
+            logger?.info(TAG_MP3_SAVE, "Album=$POLIFM_ALBUM")
             Pair(
                 "App storage/Downloads/YT Audio/${outputFile.name}",
                 outputFile.absolutePath
@@ -324,7 +356,7 @@ private fun saveMp3ToDownloads(context: Context, sourceMp3: File): Result<Pair<S
     }
 
     val resolver = context.contentResolver
-    val relativePath = Environment.DIRECTORY_DOWNLOADS + "/YT Audio"
+    val fileName = buildUniqueMp3Name { candidate -> mediaStoreFileExists(context, relativePath, candidate) }
     val values = ContentValues().apply {
         put(MediaStore.Downloads.DISPLAY_NAME, fileName)
         put(MediaStore.Downloads.MIME_TYPE, "audio/mpeg")
@@ -340,6 +372,8 @@ private fun saveMp3ToDownloads(context: Context, sourceMp3: File): Result<Pair<S
                 input.copyTo(output)
             }
         } ?: error("Failed to open output stream")
+        logger?.info(TAG_MP3_SAVE, "Saved fileName=$fileName")
+        logger?.info(TAG_MP3_SAVE, "Album=$POLIFM_ALBUM")
         Pair("Downloads/YT Audio/$fileName", uri.toString())
     }.onFailure {
         resolver.delete(uri, null, null)
@@ -575,7 +609,7 @@ private fun MainScreen() {
                             val output = File.createTempFile("yt_audio_", ".mp3", context.cacheDir)
                             val conversion = convertToMp3(source.absolutePath, output.absolutePath)
                             if (conversion.success) {
-                                val saveResult = saveMp3ToDownloads(context, output)
+                                val saveResult = saveMp3ToDownloads(context, output, logger)
                                 output.delete()
                                 saveResult.fold(
                                     onSuccess = { (path, uri) ->
