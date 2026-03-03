@@ -20,6 +20,9 @@ import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
 import com.example.noytdroid.data.AppDatabase
 import java.io.File
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -30,6 +33,7 @@ private const val AUTO_DOWNLOAD_CHANNEL_ID = "auto_download"
 private const val AUTO_DOWNLOAD_NOTIFICATION_ID = 2001
 private const val AUTO_DOWNLOAD_RESULT_NOTIFICATION_ID = 2002
 private const val TAG_AUTO_DOWNLOAD = "AutoDownload"
+private const val POLIFM_ALBUM = "Polifm"
 
 class AutoDownloadOneWorker(
     context: Context,
@@ -138,13 +142,16 @@ class AutoDownloadOneWorker(
             val root = DocumentFile.fromTreeUri(applicationContext, treeUri)
                 ?: throw IllegalStateException("Cannot access selected sync folder")
             logStep("save_start", "uri=$treeUri", video.videoId, video.channelId)
-            val targetFile = root.createFile("audio/mpeg", "$baseName.mp3")
+            val targetFileName = buildUniqueTargetMp3Name(root)
+            val targetFile = root.createFile("audio/mpeg", targetFileName)
                 ?: throw IllegalStateException("Cannot create target file in sync folder")
             withContext(Dispatchers.IO) {
                 applicationContext.contentResolver.openOutputStream(targetFile.uri)?.use { output ->
                     taggedMp3.inputStream().use { input -> input.copyTo(output) }
                 } ?: error("Cannot open output stream")
             }
+            logger.info(TAG_AUTO_DOWNLOAD, "Saved fileName=$targetFileName", context = LogContext(workerId = workerId, videoId = video.videoId, channelId = video.channelId, step = "save_done"))
+            logger.info(TAG_AUTO_DOWNLOAD, "Album=$POLIFM_ALBUM", context = LogContext(workerId = workerId, videoId = video.videoId, channelId = video.channelId, step = "save_done"))
             logStep("save_done", "uri=${targetFile.uri}", video.videoId, video.channelId)
 
             videoDao.markDone(video.videoId, targetFile.uri.toString(), System.currentTimeMillis())
@@ -278,10 +285,23 @@ class AutoDownloadOneWorker(
         val escapedTitle = title.replace("\"", "\\\"")
         val escapedArtist = artist.replace("\"", "\\\"")
         return if (coverPath != null) {
-            "-y -i \"$inputPath\" -i \"$coverPath\" -map 0:a -map 1:v -c:a libmp3lame -b:a 192k -id3v2_version 3 -metadata title=\"$escapedTitle\" -metadata artist=\"$escapedArtist\" -metadata:s:v title=\"Album cover\" -metadata:s:v comment=\"Cover (front)\" \"$outputPath\""
+            "-y -i \"$inputPath\" -i \"$coverPath\" -map 0:a -map 1:v -c:a libmp3lame -b:a 192k -id3v2_version 3 -metadata title=\"$escapedTitle\" -metadata artist=\"$escapedArtist\" -metadata album=\"$POLIFM_ALBUM\" -metadata:s:v title=\"Album cover\" -metadata:s:v comment=\"Cover (front)\" \"$outputPath\""
         } else {
-            "-y -i \"$inputPath\" -vn -c:a libmp3lame -b:a 192k -id3v2_version 3 -metadata title=\"$escapedTitle\" -metadata artist=\"$escapedArtist\" \"$outputPath\""
+            "-y -i \"$inputPath\" -vn -c:a libmp3lame -b:a 192k -id3v2_version 3 -metadata title=\"$escapedTitle\" -metadata artist=\"$escapedArtist\" -metadata album=\"$POLIFM_ALBUM\" \"$outputPath\""
         }
+    }
+
+    private fun buildUniqueTargetMp3Name(root: DocumentFile): String {
+        val epochSeconds = System.currentTimeMillis() / 1000
+        val localDate = LocalDate.now(ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("yyyy.MM.dd"))
+        val baseName = "$localDate-$epochSeconds"
+        var candidate = "$baseName.mp3"
+        var suffix = 1
+        while (root.findFile(candidate) != null) {
+            candidate = "$baseName-$suffix.mp3"
+            suffix += 1
+        }
+        return candidate
     }
 
     private fun sanitizeForFileName(input: String): String {
