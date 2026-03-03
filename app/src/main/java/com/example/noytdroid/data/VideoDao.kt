@@ -66,6 +66,26 @@ interface VideoDao {
     )
     suspend fun markError(videoId: String, error: String, ts: Long, state: String = DownloadState.ERROR)
 
+
+
+    @Query("SELECT COUNT(*) FROM videos WHERE channelId = :channelId")
+    suspend fun countVideos(channelId: String): Int
+
+    @Query("SELECT COUNT(*) FROM videos WHERE channelId = :channelId AND downloadState = :state")
+    suspend fun countVideosByState(channelId: String, state: String): Int
+
+    @Query("SELECT MAX(fetchedAt) FROM videos WHERE channelId = :channelId")
+    suspend fun getLatestFetchedAt(channelId: String): Long?
+
+    @Query("SELECT * FROM videos WHERE videoId = :videoId LIMIT 1")
+    suspend fun getVideo(videoId: String): VideoEntity?
+
+    @Query("UPDATE videos SET downloadState = :state, downloadError = NULL, downloadedAt = NULL WHERE videoId = :videoId")
+    suspend fun markState(videoId: String, state: String): Int
+
+    @Query("DELETE FROM videos WHERE videoId = :videoId")
+    suspend fun deleteVideo(videoId: String): Int
+
     @Query("DELETE FROM videos WHERE channelId = :channelId")
     suspend fun deleteVideosForChannel(channelId: String)
 }

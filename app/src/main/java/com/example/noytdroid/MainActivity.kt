@@ -14,6 +14,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,6 +32,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -54,6 +57,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
@@ -72,7 +76,6 @@ import com.example.noytdroid.data.ChannelEntity
 import com.example.noytdroid.data.DownloadState
 import com.example.noytdroid.data.FeedRepository
 import com.example.noytdroid.data.VideoEntity
-import com.example.noytdroid.data.toVideoItem
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.ReturnCode
 import com.chaquo.python.PyObject
@@ -125,6 +128,75 @@ data class VideoItem(
     val published: Instant?,
     val videoUrl: String
 )
+
+
+data class ChannelDebugStats(
+    val totalVideos: Int = 0,
+    val newVideos: Int = 0,
+    val doneVideos: Int = 0,
+    val errorVideos: Int = 0,
+    val latestFetchedAt: Long? = null
+)
+
+private fun formatDateTime(value: Long?): String {
+    if (value == null) return "NULL"
+    return DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+        .withZone(ZoneId.systemDefault())
+        .format(Instant.ofEpochMilli(value))
+}
+
+private fun debugStatusEmoji(state: String): String = when (state) {
+    DownloadState.NEW -> "🟡"
+    DownloadState.DOWNLOADING -> "🔵"
+    DownloadState.DONE -> "🟢"
+    DownloadState.ERROR -> "🔴"
+    else -> "⚪"
+}
+
+private fun jsonString(value: String?): String {
+    if (value == null) return "null"
+    return "\"" + value
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r") + "\""
+}
+
+private fun videoDumpJson(video: VideoEntity): String {
+    return """{
+  "videoId": ${jsonString(video.videoId)},
+  "channelId": ${jsonString(video.channelId)},
+  "title": ${jsonString(video.title)},
+  "publishedAt": ${video.publishedAt},
+  "videoUrl": ${jsonString(video.videoUrl)},
+  "fetchedAt": ${video.fetchedAt},
+  "downloadState": ${jsonString(video.downloadState)},
+  "downloadedUri": ${jsonString(video.downloadedUri)},
+  "downloadedAt": ${video.downloadedAt ?: "null"},
+  "downloadError": ${jsonString(video.downloadError)}
+}""".trimIndent()
+}
+
+private fun channelDumpJson(channel: ChannelEntity, stats: ChannelDebugStats): String {
+    return """{
+  "channelId": ${jsonString(channel.channelId)},
+  "title": ${jsonString(channel.title)},
+  "avatarUrl": ${jsonString(channel.avatarUrl)},
+  "sourceUrl": ${jsonString(channel.sourceUrl)},
+  "createdAt": ${channel.createdAt},
+  "updatedAt": ${channel.updatedAt},
+  "lastFeedSyncAt": ${channel.lastFeedSyncAt ?: "null"},
+  "feedError": ${jsonString(channel.feedError)},
+  "feedErrorAt": ${channel.feedErrorAt ?: "null"},
+  "stats": {
+    "totalVideos": ${stats.totalVideos},
+    "newVideos": ${stats.newVideos},
+    "doneVideos": ${stats.doneVideos},
+    "errorVideos": ${stats.errorVideos},
+    "latestFetchedAt": ${stats.latestFetchedAt ?: "null"}
+  }
+}""".trimIndent()
+}
 
 private fun normalizeChannelInput(raw: String): String {
     val trimmed = raw.trim()
@@ -426,7 +498,10 @@ private fun MainScreen() {
 
     val sortedChannels = channels
     val syncFolderPreferences = remember { SyncFolderPreferences(context) }
+    val debugUiEnabled by syncFolderPreferences.debugUiEnabledFlow.collectAsState(initial = false)
     var syncFolderUriText by rememberSaveable { mutableStateOf("") }
+    var channelStats by remember { mutableStateOf<Map<String, ChannelDebugStats>>(emptyMap()) }
+    var selectedChannelDump by remember { mutableStateOf<String?>(null) }
 
     val folderPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
@@ -447,6 +522,19 @@ private fun MainScreen() {
 
     LaunchedEffect(Unit) {
         syncFolderUriText = syncFolderPreferences.getTreeUriString().orEmpty()
+    }
+
+    LaunchedEffect(channels) {
+        channelStats = withContext(Dispatchers.IO) {
+            channels.associate { channel ->
+                val total = repository.countVideos(channel.channelId)
+                val newCount = repository.countVideosByState(channel.channelId, DownloadState.NEW)
+                val doneCount = repository.countVideosByState(channel.channelId, DownloadState.DONE)
+                val errorCount = repository.countVideosByState(channel.channelId, DownloadState.ERROR)
+                val latestFetchedAt = repository.getLatestFetchedAt(channel.channelId)
+                channel.channelId to ChannelDebugStats(total, newCount, doneCount, errorCount, latestFetchedAt)
+            }
+        }
     }
     LaunchedEffect(manualWorkId) {
         val workId = manualWorkId ?: return@LaunchedEffect
@@ -480,6 +568,7 @@ private fun MainScreen() {
         ChannelVideosScreen(
             channel = selectedChannel!!,
             repository = repository,
+            debugUiEnabled = debugUiEnabled,
             onBack = { selectedChannel = null }
         )
         return
@@ -508,6 +597,22 @@ private fun MainScreen() {
             }
         }
 
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("Show debug details")
+            Switch(
+                checked = debugUiEnabled,
+                onCheckedChange = { enabled ->
+                    scope.launch(Dispatchers.IO) {
+                        syncFolderPreferences.setDebugUiEnabled(enabled)
+                    }
+                }
+            )
+        }
+
         LazyColumn(
             modifier = Modifier
                 .weight(1f)
@@ -515,12 +620,18 @@ private fun MainScreen() {
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             items(sortedChannels, key = { it.channelId }) { channel ->
+                val stats = channelStats[channel.channelId] ?: ChannelDebugStats()
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable {
-                            selectedChannel = channel
-                        },
+                        .combinedClickable(
+                            onClick = { selectedChannel = channel },
+                            onLongClick = {
+                                if (debugUiEnabled) {
+                                    selectedChannelDump = channelDumpJson(channel, stats)
+                                }
+                            }
+                        ),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
@@ -531,16 +642,44 @@ private fun MainScreen() {
                             .size(40.dp)
                             .clip(MaterialTheme.shapes.small)
                     )
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = channel.title,
-                            style = MaterialTheme.typography.bodyLarge
-                        )
-                        Text(
-                            text = channel.channelId,
-                            style = MaterialTheme.typography.bodySmall
-                        )
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(text = channel.title, style = MaterialTheme.typography.bodyLarge)
+                        Text(text = channel.channelId.take(10) + "…", style = MaterialTheme.typography.bodySmall)
+                        if (debugUiEnabled) {
+                            Text(
+                                text = """
+channelId=${channel.channelId}
+sourceUrl=${channel.sourceUrl}
+createdAt=${formatDateTime(channel.createdAt)} updatedAt=${formatDateTime(channel.updatedAt)}
+lastFeedSyncAt=${formatDateTime(channel.lastFeedSyncAt)} feedError=${channel.feedError ?: "NULL"}
+videos total=${stats.totalVideos} new=${stats.newVideos} done=${stats.doneVideos} error=${stats.errorVideos} latestFetchedAt=${formatDateTime(stats.latestFetchedAt)}
+                                """.trimIndent(),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 8
+                            )
+                        }
                     }
+                }
+                if (debugUiEnabled) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = {
+                            val request = OneTimeWorkRequestBuilder<FeedSyncWorker>()
+                                .setConstraints(
+                                    Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
+                                )
+                                .setInputData(workDataOf("batchSize" to 1, "channelId" to channel.channelId))
+                                .build()
+                            WorkManager.getInstance(context).enqueue(request)
+                            Toast.makeText(context, "Forced sync enqueued", Toast.LENGTH_SHORT).show()
+                        }) { Text("Force sync now") }
+                        TextButton(onClick = {
+                            scope.launch(Dispatchers.IO) {
+                                repository.deleteVideosForChannel(channel.channelId)
+                            }
+                        }) { Text("Clear videos") }
+                    }
+                    HorizontalDivider()
                 }
             }
         }
@@ -801,6 +940,25 @@ private fun MainScreen() {
             }
         )
     }
+
+    if (selectedChannelDump != null) {
+        val clipboard = LocalClipboardManager.current
+        AlertDialog(
+            onDismissRequest = { selectedChannelDump = null },
+            title = { Text("Channel full dump") },
+            text = { Text(selectedChannelDump.orEmpty(), fontFamily = FontFamily.Monospace) },
+            confirmButton = {
+                TextButton(onClick = { selectedChannelDump = null }) { Text("Close") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    clipboard.setText(AnnotatedString(selectedChannelDump.orEmpty()))
+                    Toast.makeText(context, "Dump copied", Toast.LENGTH_SHORT).show()
+                }) { Text("Copy JSON") }
+            }
+        )
+    }
+
 }
 
 
@@ -816,13 +974,18 @@ private fun formatPublishedDate(value: Instant?): String {
 private fun ChannelVideosScreen(
     channel: ChannelEntity,
     repository: FeedRepository,
+    debugUiEnabled: Boolean,
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
     val logger = remember { AppLogger.getInstance(context) }
+    val scope = rememberCoroutineScope()
     val videos by repository.observeVideos(channel.channelId).collectAsState(initial = emptyList())
     var isRefreshing by remember(channel.channelId) { mutableStateOf(false) }
     var refreshError by remember(channel.channelId) { mutableStateOf<String?>(null) }
+    var selectedVideoDump by remember { mutableStateOf<String?>(null) }
+    var selectedVideoError by remember { mutableStateOf<String?>(null) }
+    var selectedActionVideoId by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(channel.channelId) {
         isRefreshing = true
@@ -879,8 +1042,7 @@ private fun ChannelVideosScreen(
             )
         }
     ) { innerPadding ->
-        val items = videos.map { it.toVideoItem() }
-        if (items.isEmpty() && isRefreshing) {
+        if (videos.isEmpty() && isRefreshing) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -904,26 +1066,121 @@ private fun ChannelVideosScreen(
                         color = MaterialTheme.colorScheme.error
                     )
                 }
-                if (items.isEmpty()) {
+                if (videos.isEmpty()) {
                     Text(text = "No videos", style = MaterialTheme.typography.bodyLarge)
                 } else {
+                    val clipboard = LocalClipboardManager.current
                     LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        items(items, key = { it.videoId }) { video ->
+                        items(videos, key = { it.videoId }) { video ->
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clickable { }
+                                    .combinedClickable(
+                                        onClick = {
+                                            if (debugUiEnabled) {
+                                                selectedVideoDump = videoDumpJson(video)
+                                            }
+                                        },
+                                        onLongClick = {
+                                            if (debugUiEnabled) {
+                                                selectedActionVideoId = video.videoId
+                                            }
+                                        }
+                                    )
                             ) {
+                                Text(text = video.title, style = MaterialTheme.typography.bodyLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                 Text(
-                                    text = video.title,
-                                    style = MaterialTheme.typography.bodyLarge
-                                )
-                                Text(
-                                    text = formatPublishedDate(video.published),
+                                    text = "${formatPublishedDate(if (video.publishedAt > 0) Instant.ofEpochMilli(video.publishedAt) else null)} • ${video.videoId}",
                                     style = MaterialTheme.typography.bodySmall
                                 )
+                                if (debugUiEnabled) {
+                                    Text(
+                                        text = "${debugStatusEmoji(video.downloadState)} state=${video.downloadState}
+videoId=${video.videoId}
+channelId=${video.channelId}
+videoUrl=${video.videoUrl}
+fetchedAt=${formatDateTime(video.fetchedAt)} downloadedAt=${formatDateTime(video.downloadedAt)}
+downloadedUri=${video.downloadedUri ?: "NULL"}
+downloadError=${video.downloadError?.take(160) ?: "NULL"}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        maxLines = 10
+                                    )
+                                    if (!video.downloadError.isNullOrBlank()) {
+                                        Text(
+                                            text = "Open full downloadError",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            modifier = Modifier.clickable {
+                                                selectedVideoError = video.downloadError
+                                            }
+                                        )
+                                    }
+                                }
                             }
                         }
+                    }
+
+                    if (selectedVideoDump != null) {
+                        AlertDialog(
+                            onDismissRequest = { selectedVideoDump = null },
+                            title = { Text("Video full dump") },
+                            text = { Text(selectedVideoDump.orEmpty(), fontFamily = FontFamily.Monospace) },
+                            confirmButton = {
+                                TextButton(onClick = { selectedVideoDump = null }) { Text("Close") }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = {
+                                    clipboard.setText(AnnotatedString(selectedVideoDump.orEmpty()))
+                                    Toast.makeText(context, "JSON copied", Toast.LENGTH_SHORT).show()
+                                }) { Text("Copy JSON") }
+                            }
+                        )
+                    }
+
+                    if (selectedActionVideoId != null) {
+                        val videoId = selectedActionVideoId.orEmpty()
+                        AlertDialog(
+                            onDismissRequest = { selectedActionVideoId = null },
+                            title = { Text("Debug actions") },
+                            text = { Text(videoId) },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    selectedActionVideoId = null
+                                    if (videoId.isNotBlank()) {
+                                        scope.launch(Dispatchers.IO) {
+                                            repository.markVideoState(videoId, DownloadState.NEW)
+                                        }
+                                    }
+                                }) { Text("Mark NEW") }
+                            },
+                            dismissButton = {
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    TextButton(onClick = {
+                                        selectedActionVideoId = null
+                                        if (videoId.isNotBlank()) {
+                                            scope.launch(Dispatchers.IO) {
+                                                repository.markVideoError(videoId, "Manually marked as ERROR from debug UI", System.currentTimeMillis())
+                                            }
+                                        }
+                                    }) { Text("Mark ERROR") }
+                                    TextButton(onClick = {
+                                        selectedActionVideoId = null
+                                        if (videoId.isNotBlank()) {
+                                            scope.launch(Dispatchers.IO) {
+                                                repository.deleteVideo(videoId)
+                                            }
+                                        }
+                                    }) { Text("Delete") }
+                                }
+                            }
+                        )
+                    } else if (!selectedVideoError.isNullOrBlank()) {
+                        AlertDialog(
+                            onDismissRequest = { selectedVideoError = null },
+                            title = { Text("Download error") },
+                            text = { Text(selectedVideoError.orEmpty()) },
+                            confirmButton = { TextButton(onClick = { selectedVideoError = null }) { Text("Close") } }
+                        )
                     }
                 }
             }
