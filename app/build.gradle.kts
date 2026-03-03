@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("com.google.devtools.ksp") version "1.9.24-1.0.20"
     id("com.chaquo.python")
 }
 
@@ -87,6 +88,7 @@ chaquopy {
 
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2024.06.00")
+    val roomVersion = "2.6.1"
 
     implementation(composeBom)
     androidTestImplementation(composeBom)
@@ -96,6 +98,9 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
+    implementation("androidx.room:room-runtime:$roomVersion")
+    implementation("androidx.room:room-ktx:$roomVersion")
+    ksp("androidx.room:room-compiler:$roomVersion")
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("io.github.jamaismagic.ffmpeg:ffmpeg-kit-main-16kb:6.1.7")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

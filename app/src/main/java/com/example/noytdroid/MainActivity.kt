@@ -53,11 +53,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.core.emptyPreferences
-import androidx.datastore.preferences.core.stringSetPreferencesKey
-import androidx.datastore.preferences.preferencesDataStore
 import coil.compose.AsyncImage
+import com.example.noytdroid.data.AppDatabase
+import com.example.noytdroid.data.ChannelEntity
+import com.example.noytdroid.data.FeedRepository
+import com.example.noytdroid.data.VideoEntity
+import com.example.noytdroid.data.toVideoItem
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.ReturnCode
 import com.chaquo.python.Python
@@ -72,8 +73,6 @@ import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
@@ -81,15 +80,11 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
-import org.json.JSONObject
 import kotlin.text.Regex
 
-private val Context.dataStore by preferencesDataStore(name = "channels")
-private val channelsKey = stringSetPreferencesKey("channels")
 private const val ADD_CHANNEL_TIMEOUT_MS = 20_000L
 private const val TAG_ADD_CHANNEL = "AddChannel"
 private val UC_CHANNEL_ID_REGEX = Regex("""/channel/(UC[a-zA-Z0-9_-]{10,})""")
-private val HANDLE_REGEX = Regex("""/@([A-Za-z0-9._-]+)""")
 
 private val channelResolveClient: OkHttpClient by lazy {
     OkHttpClient.Builder()
@@ -115,55 +110,12 @@ data class ChannelInfo(
     val finalUrl: String
 )
 
-private data class Channel(
-    val id: String,
-    val title: String,
-    val avatarUrl: String?,
-    val handle: String?
-)
-
 data class VideoItem(
     val videoId: String,
     val title: String,
     val published: Instant,
     val videoUrl: String
 )
-
-private sealed interface ChannelVideosUiState {
-    object Loading : ChannelVideosUiState
-    data class Success(val videos: List<VideoItem>) : ChannelVideosUiState
-    data class Error(val message: String) : ChannelVideosUiState
-}
-
-private fun encodeChannel(channel: Channel): String {
-    return JSONObject()
-        .put("id", channel.id)
-        .put("title", channel.title)
-        .put("avatar_url", channel.avatarUrl)
-        .put("handle", channel.handle)
-        .toString()
-}
-
-private fun decodeChannel(serialized: String): Channel? {
-    return try {
-        val json = JSONObject(serialized)
-        val id = json.optString("id")
-        val title = json.optString("title", id)
-        if (id.isBlank()) {
-            null
-        } else {
-            Channel(
-                id = id,
-                title = title.ifBlank { id },
-                avatarUrl = json.optString("avatar_url").ifBlank { null },
-                handle = json.optString("handle").ifBlank { null }
-            )
-        }
-    } catch (_: Exception) {
-        val legacyId = serialized.trim()
-        if (legacyId.isBlank()) null else Channel(legacyId, legacyId, null, null)
-    }
-}
 
 private fun normalizeChannelInput(raw: String): String {
     val trimmed = raw.trim()
@@ -350,9 +302,6 @@ suspend fun fetchChannelFeed(channelId: String): List<VideoItem> {
     }
 }
 
-private fun extractHandleFromUrl(url: String): String? {
-    return HANDLE_REGEX.find(url)?.groupValues?.get(1)?.let { "@$it" }
-}
 
 private fun safeBaseName(channelId: String, timestamp: Long): String {
     val sanitized = channelId
@@ -472,23 +421,9 @@ class MainActivity : ComponentActivity() {
 private fun MainScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var selectedChannel by remember { mutableStateOf<ChannelInfo?>(null) }
-    val channels by context.dataStore.data
-        .catch { exception ->
-            if (exception is IOException) {
-                emit(emptyPreferences())
-            } else {
-                throw exception
-            }
-        }
-        .map { preferences ->
-            val decoded = (preferences[channelsKey] ?: emptySet())
-                .mapNotNull(::decodeChannel)
-                .associateBy { it.id }
-                .values
-            decoded.toList()
-        }
-        .collectAsState(initial = emptyList())
+    val repository = remember { FeedRepository(AppDatabase.getInstance(context)) }
+    var selectedChannel by remember { mutableStateOf<ChannelEntity?>(null) }
+    val channels by repository.observeChannels().collectAsState(initial = emptyList())
 
     var showDialog by rememberSaveable { mutableStateOf(false) }
     var inputChannelLink by rememberSaveable { mutableStateOf("") }
@@ -499,13 +434,12 @@ private fun MainScreen() {
     var ffmpegResultText by rememberSaveable { mutableStateOf("ffmpeg: idle") }
     var lastSavedLocation by rememberSaveable { mutableStateOf("") }
 
-    val sortedChannels = remember(channels) {
-        channels.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.title })
-    }
+    val sortedChannels = channels
 
     if (selectedChannel != null) {
         ChannelVideosScreen(
             channel = selectedChannel!!,
+            repository = repository,
             onBack = { selectedChannel = null }
         )
         return
@@ -528,17 +462,12 @@ private fun MainScreen() {
                 .fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            items(sortedChannels, key = { it.id }) { channel ->
+            items(sortedChannels, key = { it.channelId }) { channel ->
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable {
-                            selectedChannel = ChannelInfo(
-                                channelId = channel.id,
-                                title = channel.title,
-                                avatarUrl = channel.avatarUrl,
-                                finalUrl = channel.handle.orEmpty()
-                            )
+                            selectedChannel = channel
                         },
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -556,7 +485,7 @@ private fun MainScreen() {
                             style = MaterialTheme.typography.bodyLarge
                         )
                         Text(
-                            text = channel.handle ?: channel.id,
+                            text = channel.channelId,
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
@@ -587,12 +516,12 @@ private fun MainScreen() {
                         val results = sortedChannels.map { channel ->
                             async {
                                 try {
-                                    val url = bridgeModule.callAttr("latest_video_url", channel.id)
+                                    val url = bridgeModule.callAttr("latest_video_url", channel.channelId)
                                         .toJava(String::class.java)
                                     if (url.isNullOrBlank()) {
-                                        "${channel.id} -> none"
+                                        "${channel.channelId} -> none"
                                     } else {
-                                        val baseName = safeBaseName(channel.id, System.currentTimeMillis())
+                                        val baseName = safeBaseName(channel.channelId, System.currentTimeMillis())
                                         val downloaded = bridgeModule.callAttr(
                                             "download_best_audio",
                                             url,
@@ -601,13 +530,13 @@ private fun MainScreen() {
                                         ).toJava(String::class.java) ?: "ERROR: empty response"
 
                                         if (downloaded.startsWith("ERROR:")) {
-                                            "${channel.id} -> error: $downloaded"
+                                            "${channel.channelId} -> error: $downloaded"
                                         } else {
-                                            "${channel.id} -> downloaded: ${File(downloaded).name}"
+                                            "${channel.channelId} -> downloaded: ${File(downloaded).name}"
                                         }
                                     }
                                 } catch (e: Exception) {
-                                    "${channel.id} -> error: ${e.message ?: "unknown"}"
+                                    "${channel.channelId} -> error: ${e.message ?: "unknown"}"
                                 }
                             }
                         }.awaitAll()
@@ -755,33 +684,29 @@ private fun MainScreen() {
                                     resolveChannel(normalized)
                                 }
 
-                                val exists = channels.any { it.id == resolved.channelId }
-                                if (exists) {
-                                    Toast.makeText(
-                                        context,
-                                        "Channel already added: ${resolved.channelId}",
-                                        Toast.LENGTH_SHORT
-                                    ).show()
-                                } else {
-                                    val channel = Channel(
-                                        id = resolved.channelId,
-                                        title = resolved.title,
-                                        avatarUrl = resolved.avatarUrl,
-                                        handle = extractHandleFromUrl(resolved.finalUrl)
+                                val now = System.currentTimeMillis()
+                                val existing = channels.firstOrNull { it.channelId == resolved.channelId }
+                                withContext(Dispatchers.IO) {
+                                    repository.upsertChannel(
+                                        ChannelEntity(
+                                            channelId = resolved.channelId,
+                                            title = resolved.title,
+                                            avatarUrl = resolved.avatarUrl,
+                                            sourceUrl = normalized,
+                                            createdAt = existing?.createdAt ?: now,
+                                            updatedAt = now
+                                        )
                                     )
-                                    context.dataStore.edit { preferences ->
-                                        val existing = preferences[channelsKey] ?: emptySet()
-                                        preferences[channelsKey] = existing + encodeChannel(channel)
-                                    }
-                                    Toast.makeText(
-                                        context,
-                                        "Added: ${channel.title}",
-                                        Toast.LENGTH_SHORT
-                                    ).show()
-                                    showDialog = false
-                                    inputChannelLink = ""
-                                    addChannelError = null
                                 }
+                                val wasExisting = existing != null
+                                Toast.makeText(
+                                    context,
+                                    if (wasExisting) "Updated: ${resolved.title}" else "Added: ${resolved.title}",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                showDialog = false
+                                inputChannelLink = ""
+                                addChannelError = null
                             } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
                                 Log.e(TAG_ADD_CHANNEL, "timeout", e)
                                 addChannelError = "Timed out while resolving channel. Please try again."
@@ -834,28 +759,40 @@ private fun formatPublishedDate(value: Instant): String {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ChannelVideosScreen(
-    channel: ChannelInfo,
+    channel: ChannelEntity,
+    repository: FeedRepository,
     onBack: () -> Unit
 ) {
-    var uiState by remember(channel.channelId) {
-        mutableStateOf<ChannelVideosUiState>(ChannelVideosUiState.Loading)
-    }
+    val videos by repository.observeVideos(channel.channelId).collectAsState(initial = emptyList())
+    var isRefreshing by remember(channel.channelId) { mutableStateOf(false) }
+    var refreshError by remember(channel.channelId) { mutableStateOf<String?>(null) }
 
     LaunchedEffect(channel.channelId) {
-        uiState = ChannelVideosUiState.Loading
-        uiState = try {
-            val videos = withContext(Dispatchers.IO) {
-                fetchChannelFeed(channel.channelId)
+        isRefreshing = true
+        refreshError = null
+        try {
+            val fetchedVideos = withContext(Dispatchers.IO) { fetchChannelFeed(channel.channelId) }
+            val fetchedAt = System.currentTimeMillis()
+            val entities = fetchedVideos.map { video ->
+                VideoEntity(
+                    videoId = video.videoId,
+                    channelId = channel.channelId,
+                    title = video.title,
+                    publishedAt = video.published.toEpochMilli(),
+                    videoUrl = video.videoUrl,
+                    fetchedAt = fetchedAt,
+                    downloadedAt = null
+                )
             }
-            if (videos.isEmpty()) {
-                ChannelVideosUiState.Error("No videos")
-            } else {
-                ChannelVideosUiState.Success(videos)
+            withContext(Dispatchers.IO) {
+                repository.upsertVideos(entities)
             }
         } catch (_: IOException) {
-            ChannelVideosUiState.Error("Feed unavailable")
+            refreshError = "Feed unavailable"
         } catch (_: Exception) {
-            ChannelVideosUiState.Error("Feed unavailable")
+            refreshError = "Feed unavailable"
+        } finally {
+            isRefreshing = false
         }
     }
 
@@ -880,55 +817,50 @@ private fun ChannelVideosScreen(
             )
         }
     ) { innerPadding ->
-        when (val state = uiState) {
-            ChannelVideosUiState.Loading -> {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(innerPadding),
-                    contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator()
-                }
+        val items = videos.map { it.toVideoItem() }
+        if (items.isEmpty() && isRefreshing) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator()
             }
-
-            is ChannelVideosUiState.Error -> {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(innerPadding)
-                        .padding(16.dp),
-                    contentAlignment = Alignment.Center
-                ) {
+        } else {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                if (!refreshError.isNullOrBlank()) {
                     Text(
-                        text = state.message,
-                        style = MaterialTheme.typography.bodyLarge
+                        text = refreshError.orEmpty(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
                     )
                 }
-            }
-
-            is ChannelVideosUiState.Success -> {
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(innerPadding)
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    items(state.videos, key = { it.videoId }) { video ->
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { }
-                        ) {
-                            Text(
-                                text = video.title,
-                                style = MaterialTheme.typography.bodyLarge
-                            )
-                            Text(
-                                text = formatPublishedDate(video.published),
-                                style = MaterialTheme.typography.bodySmall
-                            )
+                if (items.isEmpty()) {
+                    Text(text = "No videos", style = MaterialTheme.typography.bodyLarge)
+                } else {
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        items(items, key = { it.videoId }) { video ->
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { }
+                            ) {
+                                Text(
+                                    text = video.title,
+                                    style = MaterialTheme.typography.bodyLarge
+                                )
+                                Text(
+                                    text = formatPublishedDate(video.published),
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
                         }
                     }
                 }
