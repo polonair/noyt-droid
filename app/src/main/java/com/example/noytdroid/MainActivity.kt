@@ -12,6 +12,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -25,11 +26,18 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,7 +49,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringSetPreferencesKey
@@ -55,6 +66,7 @@ import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import java.time.LocalDate
+import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.Dispatchers
@@ -67,6 +79,8 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.xmlpull.v1.XmlPullParser
+import org.xmlpull.v1.XmlPullParserFactory
 import org.json.JSONObject
 import kotlin.text.Regex
 
@@ -85,6 +99,15 @@ private val channelResolveClient: OkHttpClient by lazy {
         .build()
 }
 
+
+private val channelFeedClient: OkHttpClient by lazy {
+    OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .callTimeout(20, TimeUnit.SECONDS)
+        .build()
+}
+
 data class ChannelInfo(
     val channelId: String,
     val title: String,
@@ -98,6 +121,19 @@ private data class Channel(
     val avatarUrl: String?,
     val handle: String?
 )
+
+data class VideoItem(
+    val videoId: String,
+    val title: String,
+    val published: Instant,
+    val videoUrl: String
+)
+
+private sealed interface ChannelVideosUiState {
+    object Loading : ChannelVideosUiState
+    data class Success(val videos: List<VideoItem>) : ChannelVideosUiState
+    data class Error(val message: String) : ChannelVideosUiState
+}
 
 private fun encodeChannel(channel: Channel): String {
     return JSONObject()
@@ -224,6 +260,96 @@ suspend fun resolveChannel(urlOrHandle: String): ChannelInfo {
     }
 }
 
+
+private fun parseChannelFeed(xml: String): List<VideoItem> {
+    if (xml.isBlank()) return emptyList()
+
+    val parser = XmlPullParserFactory.newInstance().newPullParser().apply {
+        setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, true)
+        setInput(xml.reader())
+    }
+
+    val videos = mutableListOf<VideoItem>()
+    var insideEntry = false
+    var videoId: String? = null
+    var title: String? = null
+    var published: Instant? = null
+    var videoUrl: String? = null
+
+    while (parser.eventType != XmlPullParser.END_DOCUMENT) {
+        when (parser.eventType) {
+            XmlPullParser.START_TAG -> {
+                when (parser.name) {
+                    "entry" -> {
+                        insideEntry = true
+                        videoId = null
+                        title = null
+                        published = null
+                        videoUrl = null
+                    }
+
+                    "videoId" -> if (insideEntry) {
+                        videoId = parser.nextText().trim()
+                    }
+
+                    "title" -> if (insideEntry) {
+                        title = parser.nextText().trim()
+                    }
+
+                    "published" -> if (insideEntry) {
+                        published = runCatching { Instant.parse(parser.nextText().trim()) }.getOrNull()
+                    }
+
+                    "link" -> if (insideEntry) {
+                        val href = parser.getAttributeValue(null, "href")?.trim()
+                        if (!href.isNullOrBlank()) {
+                            videoUrl = href
+                        }
+                    }
+                }
+            }
+
+            XmlPullParser.END_TAG -> {
+                if (parser.name == "entry") {
+                    insideEntry = false
+                    if (!videoId.isNullOrBlank() && !title.isNullOrBlank() && published != null) {
+                        val resolvedUrl = videoUrl ?: "https://www.youtube.com/watch?v=$videoId"
+                        videos += VideoItem(
+                            videoId = videoId,
+                            title = title,
+                            published = published,
+                            videoUrl = resolvedUrl
+                        )
+                    }
+                }
+            }
+        }
+        parser.next()
+    }
+
+    return videos
+}
+
+suspend fun fetchChannelFeed(channelId: String): List<VideoItem> {
+    val request = Request.Builder()
+        .url("https://www.youtube.com/feeds/videos.xml?channel_id=$channelId")
+        .get()
+        .build()
+
+    val response = withContext(Dispatchers.IO) {
+        channelFeedClient.newCall(request).execute()
+    }
+
+    response.use { httpResponse ->
+        if (httpResponse.code != 200) {
+            throw IOException("Feed unavailable")
+        }
+
+        val xml = httpResponse.body?.string().orEmpty()
+        return parseChannelFeed(xml)
+    }
+}
+
 private fun extractHandleFromUrl(url: String): String? {
     return HANDLE_REGEX.find(url)?.groupValues?.get(1)?.let { "@$it" }
 }
@@ -346,6 +472,7 @@ class MainActivity : ComponentActivity() {
 private fun MainScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    var selectedChannel by remember { mutableStateOf<ChannelInfo?>(null) }
     val channels by context.dataStore.data
         .catch { exception ->
             if (exception is IOException) {
@@ -376,6 +503,14 @@ private fun MainScreen() {
         channels.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.title })
     }
 
+    if (selectedChannel != null) {
+        ChannelVideosScreen(
+            channel = selectedChannel!!,
+            onBack = { selectedChannel = null }
+        )
+        return
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -398,11 +533,12 @@ private fun MainScreen() {
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable {
-                            Toast.makeText(
-                                context,
-                                "channel_id = ${channel.id}",
-                                Toast.LENGTH_SHORT
-                            ).show()
+                            selectedChannel = ChannelInfo(
+                                channelId = channel.id,
+                                title = channel.title,
+                                avatarUrl = channel.avatarUrl,
+                                finalUrl = channel.handle.orEmpty()
+                            )
                         },
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -685,5 +821,118 @@ private fun MainScreen() {
                 }
             }
         )
+    }
+}
+
+
+private fun formatPublishedDate(value: Instant): String {
+    return DateTimeFormatter.ofPattern("yyyy-MM-dd")
+        .withZone(ZoneId.systemDefault())
+        .format(value)
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChannelVideosScreen(
+    channel: ChannelInfo,
+    onBack: () -> Unit
+) {
+    var uiState by remember(channel.channelId) {
+        mutableStateOf<ChannelVideosUiState>(ChannelVideosUiState.Loading)
+    }
+
+    LaunchedEffect(channel.channelId) {
+        uiState = ChannelVideosUiState.Loading
+        uiState = try {
+            val videos = withContext(Dispatchers.IO) {
+                fetchChannelFeed(channel.channelId)
+            }
+            if (videos.isEmpty()) {
+                ChannelVideosUiState.Error("No videos")
+            } else {
+                ChannelVideosUiState.Success(videos)
+            }
+        } catch (_: IOException) {
+            ChannelVideosUiState.Error("Feed unavailable")
+        } catch (_: Exception) {
+            ChannelVideosUiState.Error("Feed unavailable")
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(
+                        text = channel.title,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back"
+                        )
+                    }
+                }
+            )
+        }
+    ) { innerPadding ->
+        when (val state = uiState) {
+            ChannelVideosUiState.Loading -> {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(innerPadding),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator()
+                }
+            }
+
+            is ChannelVideosUiState.Error -> {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(innerPadding)
+                        .padding(16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = state.message,
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                }
+            }
+
+            is ChannelVideosUiState.Success -> {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(innerPadding)
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(state.videos, key = { it.videoId }) { video ->
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { }
+                        ) {
+                            Text(
+                                text = video.title,
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            Text(
+                                text = formatPublishedDate(video.published),
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
