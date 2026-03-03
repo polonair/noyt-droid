@@ -971,9 +971,11 @@ private fun formatPublishedDate(value: Instant?): String {
         .format(value)
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(
+    ExperimentalMaterial3Api::class,
+    ExperimentalFoundationApi::class
+)
 @Composable
-@OptIn(ExperimentalFoundationApi::class)
 private fun ChannelVideosScreen(
     channel: ChannelEntity,
     repository: FeedRepository,
