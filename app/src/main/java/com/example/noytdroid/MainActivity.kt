@@ -1095,13 +1095,15 @@ private fun ChannelVideosScreen(
                                 )
                                 if (debugUiEnabled) {
                                     Text(
-                                        text = "${debugStatusEmoji(video.downloadState)} state=${video.downloadState}
-videoId=${video.videoId}
-channelId=${video.channelId}
-videoUrl=${video.videoUrl}
-fetchedAt=${formatDateTime(video.fetchedAt)} downloadedAt=${formatDateTime(video.downloadedAt)}
-downloadedUri=${video.downloadedUri ?: "NULL"}
-downloadError=${video.downloadError?.take(160) ?: "NULL"}",
+                                        text = """
+                                            ${debugStatusEmoji(video.downloadState)} state=${video.downloadState}
+                                            videoId=${video.videoId}
+                                            channelId=${video.channelId}
+                                            videoUrl=${video.videoUrl}
+                                            fetchedAt=${formatDateTime(video.fetchedAt)} downloadedAt=${formatDateTime(video.downloadedAt)}
+                                            downloadedUri=${video.downloadedUri ?: "NULL"}
+                                            downloadError=${video.downloadError?.take(160) ?: "NULL"}
+                                        """.trimIndent(),
                                         style = MaterialTheme.typography.bodySmall,
                                         fontFamily = FontFamily.Monospace,
                                         maxLines = 10
