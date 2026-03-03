@@ -105,6 +105,81 @@ def latest_video_url(channel_id: str) -> str | None:
         return None
 
 
+def list_latest_videos(channel_id: str, limit: int = 15) -> list[dict]:
+    try:
+        import yt_dlp
+    except Exception:
+        return []
+
+    if not channel_id:
+        return []
+
+    channel_url = f"https://www.youtube.com/channel/{channel_id}/videos"
+
+    def resolve_video_url(entry: dict) -> str:
+        raw_url = entry.get("url")
+        if isinstance(raw_url, str) and raw_url:
+            if raw_url.startswith("http://") or raw_url.startswith("https://"):
+                return raw_url
+            return f"https://www.youtube.com/watch?v={raw_url}"
+
+        webpage_url = entry.get("webpage_url")
+        if isinstance(webpage_url, str) and webpage_url:
+            return webpage_url
+
+        video_id = entry.get("id")
+        if isinstance(video_id, str) and video_id:
+            return f"https://www.youtube.com/watch?v={video_id}"
+
+        return ""
+
+    try:
+        with yt_dlp.YoutubeDL({
+            "quiet": True,
+            "skip_download": True,
+            "extract_flat": True,
+            "playlistend": max(1, int(limit)),
+            "socket_timeout": 15,
+            "retries": 2,
+            "noplaylist": False,
+        }) as ydl:
+            info = ydl.extract_info(channel_url, download=False)
+    except Exception:
+        return []
+
+    entries = info.get("entries") if isinstance(info, dict) else None
+    if not entries:
+        return []
+
+    videos: list[dict] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+
+        video_id = entry.get("id")
+        title = entry.get("title") or ""
+        if not isinstance(video_id, str) or not video_id:
+            continue
+
+        video_url = resolve_video_url(entry)
+        if not video_url:
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+
+        timestamp = entry.get("timestamp")
+        published_at = None
+        if isinstance(timestamp, (int, float)):
+            published_at = int(timestamp)
+
+        videos.append({
+            "videoId": video_id,
+            "title": title,
+            "videoUrl": video_url,
+            "publishedAt": published_at,
+        })
+
+    return videos
+
+
 def download_best_audio(url: str, out_dir: str, base_name: str) -> str:
     try:
         import glob

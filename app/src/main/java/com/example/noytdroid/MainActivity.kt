@@ -57,6 +57,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.work.Constraints
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
+import androidx.work.workDataOf
 import coil.compose.AsyncImage
 import com.example.noytdroid.data.AppDatabase
 import com.example.noytdroid.data.ChannelEntity
@@ -75,21 +82,20 @@ import java.time.LocalDate
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.UUID
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.xmlpull.v1.XmlPullParser
-import org.xmlpull.v1.XmlPullParserFactory
 import kotlin.text.Regex
 
 private const val ADD_CHANNEL_TIMEOUT_MS = 20_000L
 private const val TAG_ADD_CHANNEL = "AddChannel"
 private const val LOG_SCREEN_LIMIT = 200
+private const val MANUAL_FEED_SYNC_WORK_NAME = "feed_sync_manual"
 private val UC_CHANNEL_ID_REGEX = Regex("""/channel/(UC[a-zA-Z0-9_-]{10,})""")
 
 private val channelResolveClient: OkHttpClient by lazy {
@@ -101,14 +107,6 @@ private val channelResolveClient: OkHttpClient by lazy {
 }
 
 
-private val channelFeedClient: OkHttpClient by lazy {
-    OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .callTimeout(20, TimeUnit.SECONDS)
-        .build()
-}
-
 data class ChannelInfo(
     val channelId: String,
     val title: String,
@@ -119,7 +117,7 @@ data class ChannelInfo(
 data class VideoItem(
     val videoId: String,
     val title: String,
-    val published: Instant,
+    val published: Instant?,
     val videoUrl: String
 )
 
@@ -219,105 +217,35 @@ suspend fun resolveChannel(urlOrHandle: String): ChannelInfo {
 }
 
 
-private fun parseChannelFeed(xml: String): List<VideoItem> {
-    if (xml.isBlank()) return emptyList()
+suspend fun fetchChannelFeed(channelId: String, logger: AppLogger? = null, limit: Int = 15): List<VideoItem> {
+    return withContext(Dispatchers.IO) {
+        val bridgeModule = Python.getInstance().getModule("bridge")
+        logger?.info("YT-DLP", "Fetch channel=$channelId limit=$limit")
+        val rawItems = bridgeModule.callAttr("list_latest_videos", channelId, limit)
+            .toJava(List::class.java) as? List<*> ?: emptyList<Any>()
 
-    val parser = XmlPullParserFactory.newInstance().newPullParser().apply {
-        setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, true)
-        setInput(xml.reader())
-    }
+        val parsed = rawItems.mapNotNull { raw ->
+            val item = raw as? Map<*, *> ?: return@mapNotNull null
+            val videoId = item["videoId"] as? String ?: return@mapNotNull null
+            val title = (item["title"] as? String).orEmpty().ifBlank { videoId }
+            val videoUrl = ((item["videoUrl"] as? String).orEmpty())
+                .ifBlank { "https://www.youtube.com/watch?v=$videoId" }
 
-    val videos = mutableListOf<VideoItem>()
-    var insideEntry = false
-    var videoId: String? = null
-    var title: String? = null
-    var published: Instant? = null
-    var videoUrl: String? = null
-
-    while (parser.eventType != XmlPullParser.END_DOCUMENT) {
-        when (parser.eventType) {
-            XmlPullParser.START_TAG -> {
-                when (parser.name) {
-                    "entry" -> {
-                        insideEntry = true
-                        videoId = null
-                        title = null
-                        published = null
-                        videoUrl = null
-                    }
-
-                    "videoId" -> if (insideEntry) {
-                        videoId = parser.nextText().trim()
-                    }
-
-                    "title" -> if (insideEntry) {
-                        title = parser.nextText().trim()
-                    }
-
-                    "published" -> if (insideEntry) {
-                        published = runCatching { Instant.parse(parser.nextText().trim()) }.getOrNull()
-                    }
-
-                    "link" -> if (insideEntry) {
-                        val href = parser.getAttributeValue(null, "href")?.trim()
-                        if (!href.isNullOrBlank()) {
-                            videoUrl = href
-                        }
-                    }
-                }
+            val published = (item["publishedAt"] as? Number)?.toLong()?.let {
+                Instant.ofEpochSecond(it)
             }
 
-            XmlPullParser.END_TAG -> {
-                if (parser.name == "entry") {
-                    insideEntry = false
-                    if (!videoId.isNullOrBlank() && !title.isNullOrBlank() && published != null) {
-                        val resolvedUrl = videoUrl ?: "https://www.youtube.com/watch?v=$videoId"
-                        videos += VideoItem(
-                            videoId = videoId,
-                            title = title,
-                            published = published,
-                            videoUrl = resolvedUrl
-                        )
-                    }
-                }
-            }
-        }
-        parser.next()
-    }
-
-    return videos
-}
-
-suspend fun fetchChannelFeed(channelId: String, logger: AppLogger? = null): List<VideoItem> {
-    val request = Request.Builder()
-        .url("https://www.youtube.com/feeds/videos.xml?channel_id=$channelId")
-        .get()
-        .build()
-
-    val response = withContext(Dispatchers.IO) {
-        channelFeedClient.newCall(request).execute()
-    }
-
-    response.use { httpResponse ->
-        logger?.info("RSS", "Fetch channel=$channelId code=${httpResponse.code}")
-        if (httpResponse.code != 200) {
-            throw IOException("Feed unavailable")
+            VideoItem(
+                videoId = videoId,
+                title = title,
+                published = published,
+                videoUrl = videoUrl
+            )
         }
 
-        val xml = httpResponse.body?.string().orEmpty()
-        val parsed = parseChannelFeed(xml)
-        logger?.info("RSS", "Parse ok channel=$channelId entries=${parsed.size}")
-        return parsed
+        logger?.info("YT-DLP", "Parse ok channel=$channelId entries=${parsed.size}")
+        parsed
     }
-}
-
-
-private fun safeBaseName(channelId: String, timestamp: Long): String {
-    val sanitized = channelId
-        .replace(Regex("[^A-Za-z0-9._-]"), "_")
-        .trim('_', '.', ' ')
-        .ifEmpty { "channel" }
-    return "${sanitized}_$timestamp"
 }
 
 private data class ConversionResult(
@@ -441,7 +369,8 @@ private fun MainScreen() {
     var isResolvingChannel by rememberSaveable { mutableStateOf(false) }
     var addChannelError by rememberSaveable { mutableStateOf<String?>(null) }
     var isRunning by rememberSaveable { mutableStateOf(false) }
-    var runResults by remember { mutableStateOf(emptyList<String>()) }
+    var runStatus by rememberSaveable { mutableStateOf("Idle") }
+    var manualWorkId by remember { mutableStateOf<UUID?>(null) }
     var ffmpegResultText by rememberSaveable { mutableStateOf("ffmpeg: idle") }
     var lastSavedLocation by rememberSaveable { mutableStateOf("") }
 
@@ -468,6 +397,25 @@ private fun MainScreen() {
 
     LaunchedEffect(Unit) {
         syncFolderUriText = syncFolderPreferences.getTreeUriString().orEmpty()
+    }
+    LaunchedEffect(manualWorkId) {
+        val workId = manualWorkId ?: return@LaunchedEffect
+        WorkManager.getInstance(context)
+            .getWorkInfoByIdFlow(workId)
+            .collect { info ->
+                if (info == null) return@collect
+                runStatus = when (info.state) {
+                    WorkInfo.State.ENQUEUED -> "Enqueued"
+                    WorkInfo.State.RUNNING -> "Running"
+                    WorkInfo.State.SUCCEEDED -> "Success"
+                    WorkInfo.State.FAILED -> "Failure"
+                    WorkInfo.State.CANCELLED -> "Cancelled"
+                    WorkInfo.State.BLOCKED -> "Blocked"
+                }
+                if (info.state.isFinished) {
+                    isRunning = false
+                }
+            }
     }
 
     if (showLogsScreen) {
@@ -559,43 +507,25 @@ private fun MainScreen() {
 
             Button(
                 onClick = {
-                    isRunning = true
-                    runResults = emptyList()
-                    scope.launch(Dispatchers.IO) {
-                        val bridgeModule = Python.getInstance().getModule("bridge")
-                        val outDir = File(context.filesDir, "Downloads").apply { mkdirs() }
-                        val results = sortedChannels.map { channel ->
-                            async {
-                                try {
-                                    val url = bridgeModule.callAttr("latest_video_url", channel.channelId)
-                                        .toJava(String::class.java)
-                                    if (url.isNullOrBlank()) {
-                                        "${channel.channelId} -> none"
-                                    } else {
-                                        val baseName = safeBaseName(channel.channelId, System.currentTimeMillis())
-                                        val downloaded = bridgeModule.callAttr(
-                                            "download_best_audio",
-                                            url,
-                                            outDir.absolutePath,
-                                            baseName
-                                        ).toJava(String::class.java) ?: "ERROR: empty response"
+                    val request = OneTimeWorkRequestBuilder<FeedSyncWorker>()
+                        .setConstraints(
+                            Constraints.Builder()
+                                .setRequiredNetworkType(NetworkType.CONNECTED)
+                                .build()
+                        )
+                        .setInputData(workDataOf("batchSize" to 15))
+                        .build()
 
-                                        if (downloaded.startsWith("ERROR:")) {
-                                            "${channel.channelId} -> error: $downloaded"
-                                        } else {
-                                            "${channel.channelId} -> downloaded: ${File(downloaded).name}"
-                                        }
-                                    }
-                                } catch (e: Exception) {
-                                    "${channel.channelId} -> error: ${e.message ?: "unknown"}"
-                                }
-                            }
-                        }.awaitAll()
-                        withContext(Dispatchers.Main) {
-                            runResults = results
-                            isRunning = false
-                        }
-                    }
+                    manualWorkId = request.id
+                    runStatus = "Sync started..."
+                    isRunning = true
+
+                    WorkManager.getInstance(context)
+                        .enqueueUniqueWork(
+                            MANUAL_FEED_SYNC_WORK_NAME,
+                            ExistingWorkPolicy.REPLACE,
+                            request
+                        )
                 },
                 enabled = !isRunning,
                 modifier = Modifier.weight(1f)
@@ -675,23 +605,13 @@ private fun MainScreen() {
         }
 
         Text(
-            text = "Run results",
+            text = "Run status",
             style = MaterialTheme.typography.titleMedium
         )
-
-        if (runResults.isEmpty()) {
-            Text(
-                text = "No results yet",
-                style = MaterialTheme.typography.bodySmall
-            )
-        } else {
-            runResults.forEach { result ->
-                Text(
-                    text = result,
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
-        }
+        Text(
+            text = runStatus,
+            style = MaterialTheme.typography.bodySmall
+        )
     }
 
     if (showDialog) {
@@ -822,7 +742,8 @@ private fun MainScreen() {
 }
 
 
-private fun formatPublishedDate(value: Instant): String {
+private fun formatPublishedDate(value: Instant?): String {
+    if (value == null) return "Unknown date"
     return DateTimeFormatter.ofPattern("yyyy-MM-dd")
         .withZone(ZoneId.systemDefault())
         .format(value)
@@ -854,7 +775,7 @@ private fun ChannelVideosScreen(
                     videoId = video.videoId,
                     channelId = channel.channelId,
                     title = video.title,
-                    publishedAt = video.published.toEpochMilli(),
+                    publishedAt = video.published?.toEpochMilli() ?: 0L,
                     videoUrl = video.videoUrl,
                     fetchedAt = fetchedAt,
                     downloadState = DownloadState.NEW,

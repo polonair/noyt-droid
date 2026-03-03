@@ -9,7 +9,7 @@ import androidx.work.WorkManager
 import androidx.work.workDataOf
 import java.util.concurrent.TimeUnit
 
-private const val FEED_SYNC_WORK_NAME = "feed_sync"
+private const val FEED_SYNC_WORK_NAME = "feed_sync_periodic"
 private const val FEED_SYNC_BATCH_SIZE = 15
 
 class NoytApplication : Application() {

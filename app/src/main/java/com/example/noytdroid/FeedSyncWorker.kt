@@ -42,7 +42,7 @@ class FeedSyncWorker(
         channels.forEach { channel ->
             val syncTimestamp = System.currentTimeMillis()
             runCatching {
-                val videos = fetchChannelFeed(channel.channelId, logger)
+                val videos = fetchChannelFeed(channel.channelId, logger, batchSize)
                 val existingVideoIds = videoDao.getVideoIdsForChannel(channel.channelId).toHashSet()
                 val newVideoEntities = videos
                     .filterNot { existingVideoIds.contains(it.videoId) }
@@ -51,7 +51,7 @@ class FeedSyncWorker(
                             videoId = video.videoId,
                             channelId = channel.channelId,
                             title = video.title,
-                            publishedAt = video.published.toEpochMilli(),
+                            publishedAt = video.published?.toEpochMilli() ?: 0L,
                             videoUrl = video.videoUrl,
                             fetchedAt = syncTimestamp,
                             downloadState = DownloadState.NEW,
