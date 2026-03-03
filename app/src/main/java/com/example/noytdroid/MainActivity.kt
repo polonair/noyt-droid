@@ -53,6 +53,7 @@ import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.TimeUnit
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -64,6 +65,8 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.json.JSONObject
 import kotlin.text.Regex
 
@@ -71,6 +74,23 @@ private val Context.dataStore by preferencesDataStore(name = "channels")
 private val channelsKey = stringSetPreferencesKey("channels")
 private const val ADD_CHANNEL_TIMEOUT_MS = 20_000L
 private const val TAG_ADD_CHANNEL = "AddChannel"
+private val UC_CHANNEL_ID_REGEX = Regex("""/channel/(UC[a-zA-Z0-9_-]{10,})""")
+private val HANDLE_REGEX = Regex("""/@([A-Za-z0-9._-]+)""")
+
+private val channelResolveClient: OkHttpClient by lazy {
+    OkHttpClient.Builder()
+        .followRedirects(true)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .build()
+}
+
+data class ChannelInfo(
+    val channelId: String,
+    val title: String,
+    val avatarUrl: String?,
+    val finalUrl: String
+)
 
 private data class Channel(
     val id: String,
@@ -111,10 +131,101 @@ private fun decodeChannel(serialized: String): Channel? {
 
 private fun normalizeChannelInput(raw: String): String {
     val trimmed = raw.trim()
+    if (trimmed.isBlank()) return ""
     if (trimmed.startsWith("@")) {
         return "https://www.youtube.com/$trimmed"
     }
+    if (!trimmed.contains("://")) {
+        return "https://$trimmed"
+    }
     return trimmed
+}
+
+private fun findMetaContent(html: String, property: String): String? {
+    val escaped = Regex.escape(property)
+    val pattern = Regex(
+        """<meta\s+[^>]*?(?:property|name)\s*=\s*["']$escaped["'][^>]*?content\s*=\s*["']([^"']+)["'][^>]*>""",
+        setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+    )
+    return pattern.find(html)?.groupValues?.get(1)?.trim()
+}
+
+private fun findCanonicalHref(html: String): String? {
+    val pattern = Regex(
+        """<link\s+[^>]*?rel\s*=\s*["']canonical["'][^>]*?href\s*=\s*["']([^"']+)["'][^>]*>""",
+        setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+    )
+    return pattern.find(html)?.groupValues?.get(1)?.trim()
+}
+
+private fun findTitleTag(html: String): String? {
+    val pattern = Regex("""<title>(.*?)</title>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+    return pattern.find(html)?.groupValues?.get(1)?.trim()
+}
+
+private fun extractChannelId(value: String): String? {
+    return UC_CHANNEL_ID_REGEX.find(value)?.groupValues?.get(1)
+}
+
+suspend fun resolveChannel(urlOrHandle: String): ChannelInfo {
+    val normalized = normalizeChannelInput(urlOrHandle)
+    if (normalized.isBlank()) {
+        throw IllegalArgumentException("Empty channel link")
+    }
+
+    val request = Request.Builder()
+        .url(normalized)
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36"
+        )
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .header("Accept", "text/html")
+        .get()
+        .build()
+
+    val response = withContext(Dispatchers.IO) {
+        channelResolveClient.newCall(request).execute()
+    }
+
+    response.use { httpResponse ->
+        val responseCode = httpResponse.code
+        if (responseCode !in 200..399) {
+            throw IOException("HTTP $responseCode")
+        }
+
+        val finalUrl = httpResponse.request.url.toString()
+        val html = httpResponse.body?.string().orEmpty()
+        if (html.isBlank()) {
+            throw IOException("Empty response body")
+        }
+
+        val channelId = extractChannelId(finalUrl)
+            ?: findMetaContent(html, "og:url")?.let(::extractChannelId)
+            ?: findCanonicalHref(html)?.let(::extractChannelId)
+            ?: extractChannelId(html)
+            ?: throw IllegalStateException("Missing channel_id")
+
+        val title = findMetaContent(html, "og:title")
+            ?: findTitleTag(html)
+                ?.removeSuffix(" - YouTube")
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+            ?: throw IllegalStateException("Missing title")
+
+        val avatarUrl = findMetaContent(html, "og:image")?.takeIf { it.isNotBlank() }
+
+        return ChannelInfo(
+            channelId = channelId,
+            title = title,
+            avatarUrl = avatarUrl,
+            finalUrl = finalUrl
+        )
+    }
+}
+
+private fun extractHandleFromUrl(url: String): String? {
+    return HANDLE_REGEX.find(url)?.groupValues?.get(1)?.let { "@$it" }
 }
 
 private fun safeBaseName(channelId: String, timestamp: Long): String {
@@ -504,42 +615,23 @@ private fun MainScreen() {
                         addChannelError = null
                         scope.launch {
                             try {
-                                Log.d(TAG_ADD_CHANNEL, "calling python...")
                                 val resolved = withTimeout(ADD_CHANNEL_TIMEOUT_MS) {
-                                    withContext(Dispatchers.IO) {
-                                        val bridgeModule = Python.getInstance().getModule("bridge")
-                                        bridgeModule.callAttr("resolve_channel_fast", normalized)
-                                    }
+                                    resolveChannel(normalized)
                                 }
-                                Log.d(TAG_ADD_CHANNEL, "python done")
-                                val channelId = resolved.get("channel_id")
-                                    ?.toJava(String::class.java)
-                                    ?.takeIf { it.isNotBlank() }
-                                    ?: throw IllegalStateException("Missing channel_id")
-                                val title = resolved.get("title")
-                                    ?.toJava(String::class.java)
-                                    ?.takeIf { it.isNotBlank() }
-                                    ?: channelId
-                                val avatarUrl = resolved.get("avatar_url")
-                                    ?.toJava(String::class.java)
-                                    ?.takeIf { it.isNotBlank() }
-                                val handle = resolved.get("handle")
-                                    ?.toJava(String::class.java)
-                                    ?.takeIf { it.isNotBlank() }
 
-                                val exists = channels.any { it.id == channelId }
+                                val exists = channels.any { it.id == resolved.channelId }
                                 if (exists) {
                                     Toast.makeText(
                                         context,
-                                        "Channel already added: $channelId",
+                                        "Channel already added: ${resolved.channelId}",
                                         Toast.LENGTH_SHORT
                                     ).show()
                                 } else {
                                     val channel = Channel(
-                                        id = channelId,
-                                        title = title,
-                                        avatarUrl = avatarUrl,
-                                        handle = handle
+                                        id = resolved.channelId,
+                                        title = resolved.title,
+                                        avatarUrl = resolved.avatarUrl,
+                                        handle = extractHandleFromUrl(resolved.finalUrl)
                                     )
                                     context.dataStore.edit { preferences ->
                                         val existing = preferences[channelsKey] ?: emptySet()
