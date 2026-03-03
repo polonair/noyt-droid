@@ -13,6 +13,9 @@ interface VideoDao {
     @Upsert
     suspend fun upsertVideos(videos: List<VideoEntity>)
 
+    @Query("SELECT videoId FROM videos WHERE channelId = :channelId")
+    suspend fun getVideoIdsForChannel(channelId: String): List<String>
+
     @Query("DELETE FROM videos WHERE channelId = :channelId")
     suspend fun deleteVideosForChannel(channelId: String)
 }

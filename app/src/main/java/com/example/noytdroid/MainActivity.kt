@@ -84,6 +84,7 @@ import kotlin.text.Regex
 
 private const val ADD_CHANNEL_TIMEOUT_MS = 20_000L
 private const val TAG_ADD_CHANNEL = "AddChannel"
+private const val LOG_SCREEN_LIMIT = 200
 private val UC_CHANNEL_ID_REGEX = Regex("""/channel/(UC[a-zA-Z0-9_-]{10,})""")
 
 private val channelResolveClient: OkHttpClient by lazy {
@@ -282,7 +283,7 @@ private fun parseChannelFeed(xml: String): List<VideoItem> {
     return videos
 }
 
-suspend fun fetchChannelFeed(channelId: String): List<VideoItem> {
+suspend fun fetchChannelFeed(channelId: String, logger: AppLogger? = null): List<VideoItem> {
     val request = Request.Builder()
         .url("https://www.youtube.com/feeds/videos.xml?channel_id=$channelId")
         .get()
@@ -293,12 +294,15 @@ suspend fun fetchChannelFeed(channelId: String): List<VideoItem> {
     }
 
     response.use { httpResponse ->
+        logger?.info("RSS", "Fetch channel=$channelId code=${httpResponse.code}")
         if (httpResponse.code != 200) {
             throw IOException("Feed unavailable")
         }
 
         val xml = httpResponse.body?.string().orEmpty()
-        return parseChannelFeed(xml)
+        val parsed = parseChannelFeed(xml)
+        logger?.info("RSS", "Parse ok channel=$channelId entries=${parsed.size}")
+        return parsed
     }
 }
 
@@ -422,7 +426,9 @@ private fun MainScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val repository = remember { FeedRepository(AppDatabase.getInstance(context)) }
+    val logger = remember { AppLogger.getInstance(context) }
     var selectedChannel by remember { mutableStateOf<ChannelEntity?>(null) }
+    var showLogsScreen by rememberSaveable { mutableStateOf(false) }
     val channels by repository.observeChannels().collectAsState(initial = emptyList())
 
     var showDialog by rememberSaveable { mutableStateOf(false) }
@@ -435,6 +441,14 @@ private fun MainScreen() {
     var lastSavedLocation by rememberSaveable { mutableStateOf("") }
 
     val sortedChannels = channels
+
+    if (showLogsScreen) {
+        LogsScreen(
+            repository = repository,
+            onBack = { showLogsScreen = false }
+        )
+        return
+    }
 
     if (selectedChannel != null) {
         ChannelVideosScreen(
@@ -502,6 +516,15 @@ private fun MainScreen() {
                 modifier = Modifier.weight(1f)
             ) {
                 Text(text = "Add channel")
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            Button(
+                onClick = { showLogsScreen = true },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(text = "Logs")
             }
 
             Spacer(modifier = Modifier.width(8.dp))
@@ -669,6 +692,7 @@ private fun MainScreen() {
                 TextButton(
                     onClick = {
                         Log.d(TAG_ADD_CHANNEL, "UI click")
+                        logger.info("UI", "Add channel requested")
                         val normalized = normalizeChannelInput(inputChannelLink)
                         if (normalized.isBlank()) {
                             addChannelError = "Empty channel link"
@@ -683,6 +707,7 @@ private fun MainScreen() {
                                 val resolved = withTimeout(ADD_CHANNEL_TIMEOUT_MS) {
                                     resolveChannel(normalized)
                                 }
+                                logger.info("UI", "Resolve channel success id=${resolved.channelId}")
 
                                 val now = System.currentTimeMillis()
                                 val existing = channels.firstOrNull { it.channelId == resolved.channelId }
@@ -710,6 +735,7 @@ private fun MainScreen() {
                                 addChannelError = null
                             } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
                                 Log.e(TAG_ADD_CHANNEL, "timeout", e)
+                                logger.error("UI", "Resolve channel timeout", e)
                                 addChannelError = "Timed out while resolving channel. Please try again."
                                 Toast.makeText(
                                     context,
@@ -718,6 +744,7 @@ private fun MainScreen() {
                                 ).show()
                             } catch (e: Exception) {
                                 Log.e(TAG_ADD_CHANNEL, "error ${e.message}", e)
+                                logger.error("UI", "Resolve channel error: ${e.message}", e)
                                 addChannelError = e.message ?: "Failed to resolve channel"
                                 Toast.makeText(
                                     context,
@@ -764,6 +791,8 @@ private fun ChannelVideosScreen(
     repository: FeedRepository,
     onBack: () -> Unit
 ) {
+    val context = LocalContext.current
+    val logger = remember { AppLogger.getInstance(context) }
     val videos by repository.observeVideos(channel.channelId).collectAsState(initial = emptyList())
     var isRefreshing by remember(channel.channelId) { mutableStateOf(false) }
     var refreshError by remember(channel.channelId) { mutableStateOf<String?>(null) }
@@ -772,7 +801,9 @@ private fun ChannelVideosScreen(
         isRefreshing = true
         refreshError = null
         try {
-            val fetchedVideos = withContext(Dispatchers.IO) { fetchChannelFeed(channel.channelId) }
+            val fetchedVideos = withContext(Dispatchers.IO) {
+                fetchChannelFeed(channel.channelId, logger)
+            }
             val fetchedAt = System.currentTimeMillis()
             val entities = fetchedVideos.map { video ->
                 VideoEntity(
@@ -867,5 +898,106 @@ private fun ChannelVideosScreen(
                 }
             }
         }
+    }
+}
+
+
+private fun formatLogDate(value: Long): String {
+    return DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+        .withZone(ZoneId.systemDefault())
+        .format(Instant.ofEpochMilli(value))
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LogsScreen(
+    repository: FeedRepository,
+    onBack: () -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    val logs by repository.observeLatestLogs(LOG_SCREEN_LIMIT).collectAsState(initial = emptyList())
+    var selectedLog by remember { mutableStateOf<com.example.noytdroid.data.LogEntity?>(null) }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Logs") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back"
+                        )
+                    }
+                },
+                actions = {
+                    TextButton(onClick = {
+                        scope.launch(Dispatchers.IO) {
+                            repository.deleteLogsOlderThan(System.currentTimeMillis() - (7L * 24 * 60 * 60 * 1000))
+                        }
+                    }) {
+                        Text("Keep 7 days")
+                    }
+                    TextButton(onClick = {
+                        scope.launch(Dispatchers.IO) { repository.clearLogs() }
+                    }) {
+                        Text("Clear")
+                    }
+                }
+            )
+        }
+    ) { innerPadding ->
+        if (logs.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("No logs yet")
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(logs, key = { it.id }) { entry ->
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { selectedLog = entry }
+                    ) {
+                        Text(
+                            text = "${formatLogDate(entry.ts)} ${entry.level}/${entry.tag}",
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                        Text(
+                            text = entry.message,
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    if (selectedLog != null) {
+        AlertDialog(
+            onDismissRequest = { selectedLog = null },
+            title = { Text("${selectedLog?.level} / ${selectedLog?.tag}") },
+            text = {
+                Text(selectedLog?.details ?: "No details")
+            },
+            confirmButton = {
+                TextButton(onClick = { selectedLog = null }) {
+                    Text("Close")
+                }
+            }
+        )
     }
 }
