@@ -34,7 +34,7 @@ fun VideoEntity.toVideoItem(): VideoItem {
     return VideoItem(
         videoId = videoId,
         title = title,
-        published = Instant.ofEpochMilli(publishedAt),
+        published = if (publishedAt > 0) Instant.ofEpochMilli(publishedAt) else null,
         videoUrl = videoUrl
     )
 }
