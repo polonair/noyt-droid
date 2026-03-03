@@ -26,8 +26,11 @@ interface ChannelDao {
     @Query("SELECT * FROM channels WHERE channelId = :channelId LIMIT 1")
     suspend fun getChannel(channelId: String): ChannelEntity?
 
-    @Query("UPDATE channels SET lastFeedSyncAt = :timestamp WHERE channelId = :channelId")
+    @Query("UPDATE channels SET lastFeedSyncAt = :timestamp, feedError = NULL, feedErrorAt = NULL WHERE channelId = :channelId")
     suspend fun updateLastSync(channelId: String, timestamp: Long)
+
+    @Query("UPDATE channels SET feedError = :error, feedErrorAt = :ts WHERE channelId = :channelId")
+    suspend fun markFeedError(channelId: String, error: String, ts: Long)
 
     @Query("DELETE FROM channels WHERE channelId = :channelId")
     suspend fun deleteChannel(channelId: String)

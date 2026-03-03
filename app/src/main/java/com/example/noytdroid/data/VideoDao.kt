@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Upsert
 import kotlinx.coroutines.flow.Flow
 
@@ -33,7 +34,14 @@ interface VideoDao {
         WHERE videoId = :videoId
         """
     )
-    suspend fun markDownloading(videoId: String, startedAt: Long, state: String = DownloadState.DOWNLOADING)
+    suspend fun markDownloading(videoId: String, startedAt: Long, state: String = DownloadState.DOWNLOADING): Int
+
+    @Transaction
+    suspend fun pickAndMarkDownloading(startedAt: Long): VideoEntity? {
+        val candidate = getOldestUndownloaded() ?: return null
+        val updated = markDownloading(candidate.videoId, startedAt)
+        return if (updated > 0) candidate else null
+    }
 
     @Query(
         """

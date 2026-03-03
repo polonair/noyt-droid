@@ -11,5 +11,7 @@ data class ChannelEntity(
     val sourceUrl: String,
     val createdAt: Long,
     val updatedAt: Long,
-    val lastFeedSyncAt: Long? = null
+    val lastFeedSyncAt: Long? = null,
+    val feedError: String? = null,
+    val feedErrorAt: Long? = null
 )

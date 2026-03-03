@@ -9,7 +9,10 @@ class FeedRepository(private val db: AppDatabase) {
 
     fun observeVideos(channelId: String): Flow<List<VideoEntity>> = db.videoDao().observeVideos(channelId)
 
-    fun observeLatestLogs(limit: Int): Flow<List<LogEntity>> = db.logDao().observeLatest(limit)
+    fun observeLatestLogs(limit: Int, workerId: String?, videoId: String?, level: String?): Flow<List<LogEntity>> =
+        db.logDao().observeLatest(limit, workerId, videoId, level)
+
+    suspend fun getLatestLogs(limit: Int): List<LogEntity> = db.logDao().getLatest(limit)
 
     suspend fun upsertChannel(channel: ChannelEntity) {
         db.channelDao().upsertChannel(channel)

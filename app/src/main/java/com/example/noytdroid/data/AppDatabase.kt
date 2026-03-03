@@ -9,7 +9,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [ChannelEntity::class, VideoEntity::class, LogEntity::class],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -37,11 +37,19 @@ abstract class AppDatabase : RoomDatabase() {
                         level TEXT NOT NULL,
                         tag TEXT NOT NULL,
                         message TEXT NOT NULL,
-                        details TEXT
+                        details TEXT,
+                        sessionId TEXT NOT NULL DEFAULT '',
+                        workerId TEXT,
+                        videoId TEXT,
+                        channelId TEXT,
+                        step TEXT
                     )
                     """.trimIndent()
                 )
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_logs_ts ON logs(ts)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_logs_workerId ON logs(workerId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_logs_videoId ON logs(videoId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_logs_level ON logs(level)")
             }
         }
 
@@ -54,6 +62,21 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE logs ADD COLUMN sessionId TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE logs ADD COLUMN workerId TEXT")
+                db.execSQL("ALTER TABLE logs ADD COLUMN videoId TEXT")
+                db.execSQL("ALTER TABLE logs ADD COLUMN channelId TEXT")
+                db.execSQL("ALTER TABLE logs ADD COLUMN step TEXT")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_logs_workerId ON logs(workerId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_logs_videoId ON logs(videoId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_logs_level ON logs(level)")
+                db.execSQL("ALTER TABLE channels ADD COLUMN feedError TEXT")
+                db.execSQL("ALTER TABLE channels ADD COLUMN feedErrorAt INTEGER")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -61,7 +84,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "noyt.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     .build()
                     .also { INSTANCE = it }
             }
