@@ -51,7 +51,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
@@ -78,11 +80,11 @@ import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
 import java.io.File
 import java.io.IOException
+import java.time.format.DateTimeFormatter
 import java.util.concurrent.TimeUnit
 import java.time.LocalDate
 import java.time.Instant
 import java.time.ZoneId
-import java.time.format.DateTimeFormatter
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -372,6 +374,7 @@ private fun MainScreen() {
     val scope = rememberCoroutineScope()
     val repository = remember { FeedRepository(AppDatabase.getInstance(context)) }
     val logger = remember { AppLogger.getInstance(context) }
+    val crashStore = remember { CrashStore(context) }
     var selectedChannel by remember { mutableStateOf<ChannelEntity?>(null) }
     var showLogsScreen by rememberSaveable { mutableStateOf(false) }
     val channels by repository.observeChannels().collectAsState(initial = emptyList())
@@ -385,6 +388,7 @@ private fun MainScreen() {
     var manualWorkId by remember { mutableStateOf<UUID?>(null) }
     var ffmpegResultText by rememberSaveable { mutableStateOf("ffmpeg: idle") }
     var lastSavedLocation by rememberSaveable { mutableStateOf("") }
+    val lastCrash = remember { crashStore.getLastCrash() }
 
     val sortedChannels = channels
     val syncFolderPreferences = remember { SyncFolderPreferences(context) }
@@ -457,6 +461,18 @@ private fun MainScreen() {
             text = "Channels",
             style = MaterialTheme.typography.headlineMedium
         )
+
+        if (lastCrash != null) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Last crash: ${crashStore.formattedTime(lastCrash)}", modifier = Modifier.weight(1f))
+                val clipboard = LocalClipboardManager.current
+                TextButton(onClick = {
+                    clipboard.setText(AnnotatedString(lastCrash.stacktrace))
+                    Toast.makeText(context, "Stacktrace copied", Toast.LENGTH_SHORT).show()
+                }) { Text("Copy stacktrace") }
+                TextButton(onClick = { showLogsScreen = true }) { Text("Open logs") }
+            }
+        }
 
         LazyColumn(
             modifier = Modifier
@@ -895,7 +911,18 @@ private fun LogsScreen(
     onBack: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
-    val logs by repository.observeLatestLogs(LOG_SCREEN_LIMIT).collectAsState(initial = emptyList())
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    var workerFilter by rememberSaveable { mutableStateOf("") }
+    var videoFilter by rememberSaveable { mutableStateOf("") }
+    var levelFilter by rememberSaveable { mutableStateOf("") }
+    val logs by repository.observeLatestLogs(
+        LOG_SCREEN_LIMIT,
+        workerFilter.trim().ifBlank { null },
+        videoFilter.trim().ifBlank { null },
+        levelFilter.trim().uppercase().ifBlank { null }
+    ).collectAsState(initial = emptyList())
+    val crashStore = remember { CrashStore(context) }
     var selectedLog by remember { mutableStateOf<com.example.noytdroid.data.LogEntity?>(null) }
 
     Scaffold(
@@ -912,6 +939,17 @@ private fun LogsScreen(
                 },
                 actions = {
                     TextButton(onClick = {
+                        crashStore.getLastCrash()?.let {
+                            clipboard.setText(AnnotatedString(it.stacktrace))
+                            Toast.makeText(context, "Last crash copied", Toast.LENGTH_SHORT).show()
+                        }
+                    }) { Text("Copy last crash") }
+                    TextButton(onClick = {
+                        scope.launch(Dispatchers.IO) {
+                            exportLogsToDownloads(context, repository)
+                        }
+                    }) { Text("Export") }
+                    TextButton(onClick = {
                         scope.launch(Dispatchers.IO) {
                             repository.deleteLogsOlderThan(System.currentTimeMillis() - (7L * 24 * 60 * 60 * 1000))
                         }
@@ -927,39 +965,38 @@ private fun LogsScreen(
             )
         }
     ) { innerPadding ->
-        if (logs.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(innerPadding),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("No logs yet")
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(innerPadding)
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(logs, key = { it.id }) { entry ->
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { selectedLog = entry }
-                    ) {
-                        Text(
-                            text = "${formatLogDate(entry.ts)} ${entry.level}/${entry.tag}",
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                        Text(
-                            text = entry.message,
-                            style = MaterialTheme.typography.bodySmall,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
+        Column(modifier = Modifier.fillMaxSize().padding(innerPadding).padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(value = workerFilter, onValueChange = { workerFilter = it }, label = { Text("workerId") }, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(value = videoFilter, onValueChange = { videoFilter = it }, label = { Text("videoId") }, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(value = levelFilter, onValueChange = { levelFilter = it }, label = { Text("level (INFO/WARN/ERROR/FATAL)") }, modifier = Modifier.fillMaxWidth())
+
+            if (logs.isEmpty()) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("No logs yet")
+                }
+            } else {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(logs, key = { it.id }) { entry ->
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { selectedLog = entry }
+                        ) {
+                            Text(
+                                text = "${formatLogDate(entry.ts)} ${entry.level}/${entry.tag}",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                            Text(
+                                text = "worker=${entry.workerId ?: "-"} video=${entry.videoId ?: "-"} step=${entry.step ?: "-"}",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                            Text(
+                                text = entry.message,
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
                 }
             }
@@ -980,4 +1017,28 @@ private fun LogsScreen(
             }
         )
     }
+}
+
+private suspend fun exportLogsToDownloads(context: Context, repository: FeedRepository) {
+    val logs = repository.getLatestLogs(5000)
+    if (logs.isEmpty()) return
+    val fileName = "noyt_logs_${System.currentTimeMillis()}.txt"
+    val body = logs.reversed().joinToString("\n") {
+        "${it.ts}|${it.level}|${it.tag}|session=${it.sessionId}|worker=${it.workerId}|video=${it.videoId}|channel=${it.channelId}|step=${it.step}|${it.message}\n${it.details.orEmpty()}"
+    }
+
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+        val output = File(context.filesDir, fileName)
+        output.writeText(body)
+        return
+    }
+
+    val resolver = context.contentResolver
+    val values = ContentValues().apply {
+        put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+        put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+        put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+    }
+    val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return
+    resolver.openOutputStream(uri)?.use { it.write(body.toByteArray()) }
 }
