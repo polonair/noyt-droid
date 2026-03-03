@@ -35,10 +35,22 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build release APK
+      - name: Decode keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          echo "$KEYSTORE_BASE64" | base64 --decode > keystore.jks
+
+      - name: Build signed release APK
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/keystore.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: ./gradlew --no-daemon clean assembleRelease
 
-      - name: Prepare release metadata and sign APK
+      - name: Prepare release metadata
         id: metadata
         run: |
           set -euo pipefail
@@ -48,39 +60,12 @@ jobs:
             VERSION_NAME="0.0.0"
           fi
 
-          UNSIGNED_APK="app/build/outputs/apk/release/app-release-unsigned.apk"
-          SIGNED_APK="app/build/outputs/apk/release/app-release-signed.apk"
+          SIGNED_APK="app/build/outputs/apk/release/app-release.apk"
 
-          if [ ! -f "$UNSIGNED_APK" ]; then
-            echo "Unsigned release APK not found at $UNSIGNED_APK"
+          if [ ! -f "$SIGNED_APK" ]; then
+            echo "Signed release APK not found at $SIGNED_APK"
             exit 1
           fi
-
-          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n 1)
-          if [ -z "$APKSIGNER" ]; then
-            echo "apksigner tool was not found in $ANDROID_HOME/build-tools"
-            exit 1
-          fi
-
-          keytool -genkeypair \
-            -keystore release-signing-key.jks \
-            -alias release \
-            -storepass android \
-            -keypass android \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -dname "CN=GitHub Actions, OU=CI, O=noyt-droid, L=NA, S=NA, C=US"
-
-          "$APKSIGNER" sign \
-            --ks release-signing-key.jks \
-            --ks-key-alias release \
-            --ks-pass pass:android \
-            --key-pass pass:android \
-            --out "$SIGNED_APK" \
-            "$UNSIGNED_APK"
-
-          "$APKSIGNER" verify "$SIGNED_APK"
 
           TAG="v${VERSION_NAME}-${GITHUB_RUN_NUMBER}"
           APK_NAME="noyt-droid-${TAG}.apk"

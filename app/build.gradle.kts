@@ -8,11 +8,28 @@ android {
     namespace = "com.example.noytdroid"
     compileSdk = 35
 
+    fun envOrProp(name: String): String? =
+        System.getenv(name) ?: (findProperty(name) as String?)
+
+    val githubRunNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull()
+    val isReleaseBuild = gradle.startParameter.taskNames.any { it.contains("release", ignoreCase = true) }
+
+    val keystorePathValue = envOrProp("KEYSTORE_PATH")
+    val keystorePasswordValue = envOrProp("KEYSTORE_PASSWORD")
+    val keyAliasValue = envOrProp("KEY_ALIAS")
+    val keyPasswordValue = envOrProp("KEY_PASSWORD")
+
+    if (isReleaseBuild && listOf(keystorePathValue, keystorePasswordValue, keyAliasValue, keyPasswordValue).any { it.isNullOrBlank() }) {
+        throw GradleException(
+            "Release signing variables are missing. Expected KEYSTORE_PATH, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD."
+        )
+    }
+
     defaultConfig {
         applicationId = "com.example.noytdroid"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
+        versionCode = githubRunNumber ?: 1
         versionName = "1.0"
 
         ndk {
@@ -22,9 +39,21 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        create("release") {
+            if (!keystorePathValue.isNullOrBlank()) {
+                storeFile = file(keystorePathValue)
+                storePassword = keystorePasswordValue
+                keyAlias = keyAliasValue
+                keyPassword = keyPasswordValue
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
