@@ -73,6 +73,7 @@ import com.example.noytdroid.data.VideoEntity
 import com.example.noytdroid.data.toVideoItem
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.ReturnCode
+import com.chaquo.python.PyObject
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
 import java.io.File
@@ -221,17 +222,26 @@ suspend fun fetchChannelFeed(channelId: String, logger: AppLogger? = null, limit
     return withContext(Dispatchers.IO) {
         val bridgeModule = Python.getInstance().getModule("bridge")
         logger?.info("YT-DLP", "Fetch channel=$channelId limit=$limit")
-        val rawItems = bridgeModule.callAttr("list_latest_videos", channelId, limit)
-            .toJava(List::class.java) as? List<*> ?: emptyList<Any>()
+        val rawItems = try {
+            bridgeModule.callAttr("list_latest_videos", channelId, limit).asList()
+        } catch (error: RuntimeException) {
+            logger?.error("YT-DLP", "Python list conversion failed channel=$channelId", error)
+            emptyList<PyObject>()
+        }
 
         val parsed = rawItems.mapNotNull { raw ->
-            val item = raw as? Map<*, *> ?: return@mapNotNull null
-            val videoId = item["videoId"] as? String ?: return@mapNotNull null
-            val title = (item["title"] as? String).orEmpty().ifBlank { videoId }
-            val videoUrl = ((item["videoUrl"] as? String).orEmpty())
+            val item = try {
+                raw.asMap()
+            } catch (_: RuntimeException) {
+                return@mapNotNull null
+            }
+
+            val videoId = item["videoId"]?.toJava(String::class.java) as? String ?: return@mapNotNull null
+            val title = (item["title"]?.toJava(String::class.java) as? String).orEmpty().ifBlank { videoId }
+            val videoUrl = ((item["videoUrl"]?.toJava(String::class.java) as? String).orEmpty())
                 .ifBlank { "https://www.youtube.com/watch?v=$videoId" }
 
-            val published = (item["publishedAt"] as? Number)?.toLong()?.let {
+            val published = (item["publishedAt"]?.toJava(Long::class.java) as? Long)?.let {
                 Instant.ofEpochSecond(it)
             }
 
