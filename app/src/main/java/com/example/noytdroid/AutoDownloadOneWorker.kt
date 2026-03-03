@@ -4,6 +4,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
@@ -171,17 +172,27 @@ class AutoDownloadOneWorker(
             .setContentText("Downloading…")
             .setOngoing(true)
             .build()
-        return ForegroundInfo(AUTO_DOWNLOAD_NOTIFICATION_ID, notification)
+        return ForegroundInfo(
+            AUTO_DOWNLOAD_NOTIFICATION_ID,
+            notification,
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        )
     }
 
-    private fun setStepForeground(step: String) {
+    private suspend fun setStepForeground(step: String) {
         val notification = NotificationCompat.Builder(applicationContext, AUTO_DOWNLOAD_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle("Auto download")
             .setContentText("Step: $step")
             .setOngoing(true)
             .build()
-        setForegroundAsync(ForegroundInfo(AUTO_DOWNLOAD_NOTIFICATION_ID, notification))
+        setForeground(
+            ForegroundInfo(
+                AUTO_DOWNLOAD_NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
+        )
     }
 
     private fun hasNetwork(): Boolean {
