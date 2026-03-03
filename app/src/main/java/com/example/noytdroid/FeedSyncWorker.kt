@@ -19,6 +19,7 @@ import java.util.UUID
 
 private const val DEFAULT_BATCH_SIZE = 15
 private const val KEY_BATCH_SIZE = "batchSize"
+private const val KEY_CHANNEL_ID = "channelId"
 private const val TAG_FEED_SYNC_WORKER = "FeedSync"
 private const val LOG_RETENTION_MS = 7L * 24 * 60 * 60 * 1000
 private const val FEED_SYNC_CHANNEL_ID = "feed_sync"
@@ -41,7 +42,12 @@ class FeedSyncWorker(
         try {
             db.logDao().deleteOlderThan(System.currentTimeMillis() - LOG_RETENTION_MS)
             val batchSize = inputData.getInt(KEY_BATCH_SIZE, DEFAULT_BATCH_SIZE)
-            val channels = channelDao.getOldestForSync(batchSize)
+            val forcedChannelId = inputData.getString(KEY_CHANNEL_ID)
+            val channels = if (forcedChannelId.isNullOrBlank()) {
+                channelDao.getOldestForSync(batchSize)
+            } else {
+                listOfNotNull(channelDao.getChannel(forcedChannelId))
+            }
             var totalNewVideos = 0
 
             channels.forEach { channel ->
