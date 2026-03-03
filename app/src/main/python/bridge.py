@@ -265,3 +265,26 @@ def resolve_channel_fast(url_or_handle: str) -> dict:
 
 def resolve_channel(url_or_handle: str) -> dict:
     return resolve_channel_fast(url_or_handle)
+
+
+def video_metadata(url: str) -> dict:
+    try:
+        import yt_dlp
+
+        with yt_dlp.YoutubeDL({
+            "quiet": True,
+            "skip_download": True,
+            "noplaylist": True,
+        }) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        if not isinstance(info, dict):
+            return {}
+
+        return {
+            "title": info.get("title"),
+            "uploader": info.get("uploader") or info.get("channel"),
+            "thumbnail": info.get("thumbnail"),
+        }
+    except Exception:
+        return {}
