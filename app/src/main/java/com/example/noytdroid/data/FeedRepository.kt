@@ -9,6 +9,8 @@ class FeedRepository(private val db: AppDatabase) {
 
     fun observeVideos(channelId: String): Flow<List<VideoEntity>> = db.videoDao().observeVideos(channelId)
 
+    fun observeLatestLogs(limit: Int): Flow<List<LogEntity>> = db.logDao().observeLatest(limit)
+
     suspend fun upsertChannel(channel: ChannelEntity) {
         db.channelDao().upsertChannel(channel)
     }
@@ -17,6 +19,14 @@ class FeedRepository(private val db: AppDatabase) {
         if (videos.isNotEmpty()) {
             db.videoDao().upsertVideos(videos)
         }
+    }
+
+    suspend fun clearLogs() {
+        db.logDao().clearAll()
+    }
+
+    suspend fun deleteLogsOlderThan(ts: Long) {
+        db.logDao().deleteOlderThan(ts)
     }
 }
 
